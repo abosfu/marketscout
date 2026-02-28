@@ -1,0 +1,42 @@
+[
+  {
+    "title": "Site Superintendent - Construction",
+    "company": "ABC Builders Ltd",
+    "location": "Vancouver, BC",
+    "link": "https://example.com/job/1",
+    "published": "2025-02-24T10:00:00Z",
+    "source": "sample"
+  },
+  {
+    "title": "Laborer - General Construction",
+    "company": "Metro Construction",
+    "location": "Vancouver, BC",
+    "link": "https://example.com/job/2",
+    "published": "2025-02-23T14:00:00Z",
+    "source": "sample"
+  },
+  {
+    "title": "Project Coordinator - Commercial Real Estate",
+    "company": "Downtown Developments",
+    "location": "Vancouver, BC",
+    "link": "https://example.com/job/3",
+    "published": "2025-02-22T09:00:00Z",
+    "source": "sample"
+  },
+  {
+    "title": "Retail Store Manager",
+    "company": "West Coast Retail",
+    "location": "Vancouver, BC",
+    "link": "https://example.com/job/4",
+    "published": "2025-02-21T11:00:00Z",
+    "source": "sample"
+  },
+  {
+    "title": "Supply Chain Analyst",
+    "company": "Pacific Logistics",
+    "location": "Vancouver, BC",
+    "link": "https://example.com/job/5",
+    "published": "2025-02-20T08:00:00Z",
+    "source": "sample"
+  }
+]

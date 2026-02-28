@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "marketscout"
+version = "1.1.0"
+description = "MarketScout — Zero-Friction Strategy Engine (CLI). Live headlines + jobs → strategy.json, report.md, report.html"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "MarketScout" }]
+dependencies = [
+    "requests>=2.31.0",
+    "pydantic>=2.5.0",
+    "openai>=1.6.0",
+    "rich>=13.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "pytest-cov>=4.0"]
+
+[project.scripts]
+marketscout = "marketscout.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
