@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Google News - Vancouver business</title>
+    <item>
+      <title>Vancouver construction sector faces labor shortages</title>
+      <link>https://example.com/1</link>
+      <source url="https://cbc.ca">CBC News</source>
+      <pubDate>Mon, 24 Feb 2025 12:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Interest rates hold steady as Bank of Canada watches inflation</title>
+      <link>https://example.com/2</link>
+      <source url="https://reuters.com">Reuters</source>
+      <pubDate>Mon, 24 Feb 2025 10:00:00 GMT</pubDate>
+    </item>
+    <item>
+      <title>Supply chain delays hit Vancouver port</title>
+      <link>https://example.com/3</link>
+      <pubDate>Sun, 23 Feb 2025 18:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>

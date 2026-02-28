@@ -1,0 +1,7 @@
+# MarketScout — Zero-Friction Strategy Engine (CLI)
+# Python 3.11+
+
+requests>=2.31.0
+pydantic>=2.5.0
+openai>=1.6.0
+rich>=13.0.0

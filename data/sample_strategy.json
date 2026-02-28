@@ -1,0 +1,74 @@
+{
+  "strategy_version": "1.0",
+  "pain_score": 7,
+  "problems": [
+    {
+      "problem": "Labor shortages and wage pressure",
+      "evidence_headline": "Vancouver construction sector faces labor shortages amid housing push",
+      "evidence_link": "https://example.com/1"
+    },
+    {
+      "problem": "Interest rate and financing uncertainty",
+      "evidence_headline": "Interest rates hold steady as Bank of Canada watches inflation",
+      "evidence_link": "https://example.com/2"
+    },
+    {
+      "problem": "Supply chain and logistics constraints",
+      "evidence_headline": "Supply chain delays hit Vancouver port, affecting local business",
+      "evidence_link": "https://example.com/3"
+    },
+    {
+      "problem": "Permitting and regulatory delays",
+      "evidence_headline": "City streamlines permit process for new housing developments",
+      "evidence_link": "https://example.com/4"
+    }
+  ],
+  "ai_matches": [
+    {
+      "category": "Construction — Market entry",
+      "recommended_approach": "Pilot in target neighbourhoods; partner with local suppliers."
+    },
+    {
+      "category": "Construction — Market entry",
+      "recommended_approach": "Align 30-day actions with quick wins; measure and iterate."
+    },
+    {
+      "category": "Regulatory & permits",
+      "recommended_approach": "Engage early with local permits; document assumptions."
+    }
+  ],
+  "plan_30_60_90": [
+    {
+      "phase": "30-day",
+      "actions": [
+        "Define KPIs and baseline metrics",
+        "Map key stakeholders and decision makers",
+        "Draft initial scope and timeline"
+      ]
+    },
+    {
+      "phase": "60-day",
+      "actions": [
+        "Run pilot or proof of concept",
+        "Gather feedback and adjust approach",
+        "Lock budget and resource plan"
+      ]
+    },
+    {
+      "phase": "90-day",
+      "actions": [
+        "Scale or roll out next phase",
+        "Review ROI assumptions vs actuals",
+        "Plan next quarter priorities"
+      ]
+    }
+  ],
+  "roi_notes": {
+    "ranges": "15–25% improvement in target metric within 6–12 months",
+    "assumptions": [
+      "Stable labour and material costs",
+      "No major regulatory changes",
+      "Pilot conversion rates hold at scale"
+    ]
+  }
+}
