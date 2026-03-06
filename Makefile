@@ -10,6 +10,6 @@ test:
 	PYTHONPATH=src $(PYTHON) -m pytest tests/ -v
 
 clean:
-	rm -rf out/ .cache/
+	rm -rf out/ .cache/ .pytest_cache/
 
 .PHONY: run test clean

@@ -49,7 +49,15 @@ pip install -e ".[dev]"
 python -m marketscout run --city Vancouver --industry Construction
 ```
 
-Outputs land in `out/<city>_<industry>_<date>/`. The `out/` directory is gitignored — nothing generated at runtime is committed to the repo.
+Outputs land in `out/<city>_<industry>_<date>/`.
+
+> **Generated paths — never committed:**
+> | Path | Contents |
+> |------|----------|
+> | `out/` | All run artifacts (`strategy.json`, `report.html`, `leads.csv`, …). Gitignored. |
+> | `.cache/` | Disk cache of live-fetched signals with configurable TTL. Gitignored. |
+>
+> Run `make clean` to remove both.
 
 ---
 
@@ -193,7 +201,7 @@ make test
 PYTHONPATH=src pytest tests/ -v
 ```
 
-56 tests covering schema validation, deterministic mode, evidence link integrity, fetch status (live/cached/failed), CLI artifact creation, eval pass/fail cases, bundle creation, cache TTL, and provider parsing.
+86 tests covering schema validation, deterministic mode, evidence link integrity, fetch status (live/cached/failed), CLI artifact creation, eval pass/fail cases, bundle creation, cache TTL, and provider parsing.
 
 ---
 
@@ -224,20 +232,17 @@ marketscout/
 │   ├── scout/                   # headlines (RSS) + jobs (Adzuna / RSS) fetchers
 │   └── templates/               # industry keyword maps → opportunity templates
 └── tests/
-    ├── fixtures/                # sample data for tests only (not loaded at runtime)
+    ├── fixtures/                # sample data for tests only (never loaded at runtime)
     │   ├── sample_headlines.json
     │   ├── sample_jobs.json
     │   ├── sample_strategy_v2.json
     │   └── sample_rss.xml
     ├── conftest.py
-    ├── test_cli_run.py
-    ├── test_fetch_status.py
-    ├── test_bundle_cmd.py
-    ├── test_eval_cmd.py
-    ├── test_normalization.py
-    ├── test_strategy.py
-    ├── test_schema.py
-    └── ...
+    ├── test_cli.py              # run, eval, bundle, fetch status, run metadata
+    ├── test_strategy.py         # scoring, deterministic, evidence integrity, reports, leads
+    ├── test_normalize.py        # city/industry normalization, template lookup, CLI validation
+    ├── test_scout.py            # headlines, jobs, Adzuna provider
+    └── test_cache.py            # cache key, TTL, read/write
 ```
 
 ---
