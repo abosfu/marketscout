@@ -4,6 +4,9 @@ from pathlib import Path
 
 import pytest
 
+# All sample data lives here — never under data/ which is runtime-empty.
+FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
+
 
 @pytest.fixture
 def repo_root() -> Path:
@@ -12,10 +15,6 @@ def repo_root() -> Path:
 
 
 @pytest.fixture
-def sample_headlines_path(repo_root: Path) -> Path:
-    return repo_root / "data" / "sample_headlines.json"
-
-
-@pytest.fixture
-def sample_strategy_path(repo_root: Path) -> Path:
-    return repo_root / "data" / "sample_strategy.json"
+def sample_strategy_v2_path() -> Path:
+    """V2.0 sample strategy JSON for schema / report tests."""
+    return FIXTURES_DIR / "sample_strategy_v2.json"

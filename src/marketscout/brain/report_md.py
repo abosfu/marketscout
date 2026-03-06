@@ -1,4 +1,4 @@
-"""Convert strategy JSON to human-readable Markdown report. Never crashes; validates first."""
+"""Convert strategy JSON (v2.0) to human-readable Markdown report. Never crashes; validates first."""
 
 from __future__ import annotations
 
@@ -7,11 +7,15 @@ from typing import Any
 from marketscout.brain.schema import StrategyOutput
 
 
-def strategy_to_markdown(data: dict[str, Any] | StrategyOutput) -> str:
+def strategy_to_markdown(
+    data: dict[str, Any] | StrategyOutput,
+    *,
+    signal_analysis: dict[str, Any] | None = None,
+) -> str:
     """
-    Convert strategy to Markdown. Accepts dict or StrategyOutput.
-    Validates first; on validation failure returns a minimal safe report.
-    Missing fields are skipped or replaced with placeholders so the function never raises.
+    Convert v2.0 strategy to Markdown. Accepts dict or StrategyOutput.
+    Sections: Executive Summary, Signal Analysis (if provided), Opportunity Map table,
+    per-opportunity detail (problem, evidence, business case, score breakdown), Leads, Sources.
     """
     try:
         if isinstance(data, StrategyOutput):
@@ -23,95 +27,128 @@ def strategy_to_markdown(data: dict[str, Any] | StrategyOutput) -> str:
 
     sections: list[str] = []
 
-    # Executive Summary
-    pain = getattr(strategy, "pain_score", 0)
-    n_problems = len(getattr(strategy, "problems", []))
+    # Executive Summary (city, industry, data quality)
+    city = getattr(strategy, "city", "")
+    industry = getattr(strategy, "industry", "")
+    dq = getattr(strategy, "data_quality", None)
     sections.append("# Executive Summary\n")
-    sections.append(
-        f"This strategy report has a **Pain Score** of {pain}/10 "
-        f"and identifies {n_problems} opportunity areas with evidence from recent headlines and job signals.\n"
-    )
-
-    # Signals Used
+    sections.append(f"**City:** {city}  \n**Industry:** {industry}\n")
+    if dq is not None:
+        sections.append(
+            f"**Data quality:** freshness {getattr(dq, 'freshness_window_days', 0)} days | "
+            f"coverage {getattr(dq, 'coverage_score', 0):.2f} | source mix {getattr(dq, 'source_mix_score', 0):.2f}\n"
+        )
     signals = getattr(strategy, "signals_used", None)
     if signals is not None:
-        sections.append("# Signals Used\n")
-        sections.append(f"- **Headlines count:** {getattr(signals, 'headlines_count', 0)}\n")
-        sections.append(f"- **Jobs count:** {getattr(signals, 'jobs_count', 0)}\n")
-        sections.append(f"- **Econ used:** {getattr(signals, 'econ_used', False)}\n")
+        sections.append(
+            f"**Signals:** {getattr(signals, 'headlines_count', 0)} headlines, "
+            f"{getattr(signals, 'jobs_count', 0)} jobs, "
+            f"{getattr(signals, 'news_sources_count', 0)} news sources, "
+            f"{getattr(signals, 'job_companies_count', 0)} job companies.\n"
+        )
 
-    # Score Breakdown
-    breakdown = getattr(strategy, "score_breakdown", None)
-    if breakdown is not None:
-        sections.append("# Score Breakdown\n")
-        sections.append(f"- **News signal score (0-10):** {getattr(breakdown, 'news_signal_score', 0)}\n")
-        sections.append(f"- **Jobs signal score (0-10):** {getattr(breakdown, 'jobs_signal_score', 0)}\n")
-        sections.append(f"- **Combined pain score (1-10):** {getattr(breakdown, 'combined_pain_score', 0)}\n")
-        weights = getattr(breakdown, "weights", {}) or {}
-        sections.append(f"- **Weights:** {weights}\n")
+    # Signal Analysis (counts, fetch status, run metadata, keyword hits)
+    if signal_analysis:
+        sections.append("# Signal Analysis\n")
+        sig = signal_analysis.get("signals") or {}
+        sections.append(
+            f"- **Headlines:** {sig.get('headlines_count', 0)} | **Jobs:** {sig.get('jobs_count', 0)} | "
+            f"**Unique news sources:** {sig.get('unique_news_sources', 0)} | **Unique companies:** {sig.get('unique_companies', 0)}\n"
+        )
 
-    # Opportunity Map (table)
+        fetch_status = signal_analysis.get("fetch_status") or {}
+        if fetch_status:
+            sections.append("**Fetch status:**\n")
+            sections.append("| Source | Provider | Status | Note |")
+            sections.append("|--------|----------|--------|------|")
+            for source, entry in fetch_status.items():
+                provider = entry.get("provider", "")
+                status = entry.get("status", "")
+                note = (entry.get("error") or "")[:80]
+                sections.append(f"| {source} | {provider} | {status} | {note} |")
+            sections.append("")
+
+        run_meta = signal_analysis.get("run_metadata") or {}
+        if run_meta:
+            sections.append(
+                f"**Run:** started {run_meta.get('started_at_iso', '')} | "
+                f"{run_meta.get('duration_ms', 0)} ms | "
+                f"deterministic={run_meta.get('deterministic', False)} | "
+                f"cache_used={run_meta.get('cache_used', False)}\n"
+            )
+
+        keyword_hits = signal_analysis.get("keyword_hits") or {}
+        if keyword_hits:
+            sections.append("**Keyword hits (tag → count):**\n")
+            for tag, count in sorted(keyword_hits.items()):
+                sections.append(f"- {tag}: {count}\n")
+        derived = signal_analysis.get("derived_tags") or {}
+        if derived:
+            sections.append("**Derived tags:**\n")
+            for tag, count in sorted(derived.items()):
+                sections.append(f"- {tag}: {count}\n")
+        sections.append("")
+
+    # Opportunity Map table (title, pain, ROI signal, confidence, category)
+    opps = getattr(strategy, "opportunity_map", [])
     sections.append("# Opportunity Map\n")
-    problems = getattr(strategy, "problems", [])
-    if problems:
-        sections.append("| Problem | Evidence | Link |")
-        sections.append("|---------|----------|------|")
-        for p in problems:
-            prob = getattr(p, "problem", "")
-            head = (getattr(p, "evidence_headline", "") or "")[:80]
-            if len(getattr(p, "evidence_headline", "") or "") > 80:
-                head += "..."
-            link = getattr(p, "evidence_link", "") or "#"
-            sections.append(f"| {prob} | {head} | {link} |")
+    if opps:
+        sections.append("| Title | Pain | ROI signal | Confidence | Category |")
+        sections.append("|-------|------|------------|------------|----------|")
+        for o in opps:
+            title = (getattr(o, "title", "") or "")[:45]
+            if len(getattr(o, "title", "") or "") > 45:
+                title += "..."
+            pain = getattr(o, "pain_score", 0)
+            roi = getattr(o, "roi_signal", 0)
+            conf = getattr(o, "confidence", 0)
+            cat = getattr(o, "ai_category", "")
+            sections.append(f"| {title} | {pain} | {roi} | {conf:.2f} | {cat} |")
         sections.append("")
     else:
-        sections.append("*No problems documented.*\n")
+        sections.append("*No opportunities.*\n")
 
-    # AI Matches
-    sections.append("# AI Matches\n")
-    matches = getattr(strategy, "ai_matches", [])
-    for m in matches:
-        cat = getattr(m, "category", "Category")
-        approach = getattr(m, "recommended_approach", "")
-        sections.append(f"## {cat}\n\n{approach}\n")
-    if not matches:
-        sections.append("*No AI matches.*\n")
-
-    # 30/60/90 Plan
-    sections.append("# 30/60/90 Plan\n")
-    plan = getattr(strategy, "plan_30_60_90", [])
-    for phase in plan:
-        ph = getattr(phase, "phase", "Phase")
-        actions = getattr(phase, "actions", [])
-        sections.append(f"## {ph}\n\n")
-        for a in actions:
-            sections.append(f"- {a}\n")
+    # Each opportunity detail (problem, evidence, business case)
+    for i, o in enumerate(opps, 1):
+        title = getattr(o, "title", "") or f"Opportunity {i}"
+        sections.append(f"## {i}. {title}\n")
+        sections.append(f"**Problem:** {getattr(o, 'problem', '')}\n")
+        evidence_list = getattr(o, "evidence", []) or []
+        if evidence_list:
+            sections.append("**Evidence:**\n")
+            for e in evidence_list:
+                tit = getattr(e, "title", "") or ""
+                link = getattr(e, "link", "") or "#"
+                src = getattr(e, "source", "")
+                sections.append(f"- [{tit[:70]}]({link}) ({src})")
+            sections.append("")
+        bc = getattr(o, "business_case", None)
+        if bc:
+            sections.append(f"**Business case:** {getattr(bc, 'savings_range_annual', '')}\n")
+            for a in getattr(bc, "assumptions", []) or []:
+                sections.append(f"- {a}\n")
+        sb = getattr(o, "score_breakdown", None)
+        if sb is not None:
+            sections.append(
+                f"**Score breakdown:** signal_frequency={getattr(sb, 'signal_frequency', 0):.2f} | "
+                f"source_diversity={getattr(sb, 'source_diversity', 0):.2f} | job_role_density={getattr(sb, 'job_role_density', 0):.2f}\n"
+            )
         sections.append("")
-    if not plan:
-        sections.append("*No plan phases.*\n")
 
-    # ROI Notes & Assumptions
-    sections.append("# ROI Notes & Assumptions\n")
-    roi = getattr(strategy, "roi_notes", None)
-    if roi:
-        ranges = getattr(roi, "ranges", "") or ""
-        assumptions = getattr(roi, "assumptions", []) or []
-        sections.append(f"**Ranges:** {ranges}\n\n**Assumptions:**\n")
-        for a in assumptions:
-            sections.append(f"- {a}\n")
-        sections.append("")
-    else:
-        sections.append("*No ROI notes.*\n")
+    # Leads section summary
+    sections.append("# Leads\n")
+    sections.append("See **leads.csv** for company-level leads (top companies by readiness).\n")
 
-    # Sources (links)
+    # Sources list (from opportunity evidence links)
     sections.append("# Sources\n")
     seen_links: set[str] = set()
-    for p in problems:
-        link = getattr(p, "evidence_link", "") or ""
-        if link and link != "#" and link not in seen_links:
-            seen_links.add(link)
-            head = getattr(p, "evidence_headline", "") or link
-            sections.append(f"- [{head[:60]}]({link})\n")
+    for o in opps:
+        for e in getattr(o, "evidence", []) or []:
+            link = getattr(e, "link", "") or ""
+            if link and link != "#" and link not in seen_links:
+                seen_links.add(link)
+                tit = getattr(e, "title", "") or link
+                sections.append(f"- [{tit[:60]}]({link})\n")
     if not seen_links:
         sections.append("*No sources.*\n")
 

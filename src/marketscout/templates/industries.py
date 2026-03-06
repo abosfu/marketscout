@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from marketscout.normalize import SUPPORTED_INDUSTRIES, normalize_industry  # noqa: F401 (re-exported for convenience)
+
 # Allowed AI categories (must match brain strategy enum)
 AI_CATEGORIES_ALLOWED = (
     "Market entry",
@@ -269,5 +271,13 @@ INDUSTRY_TEMPLATES: dict[str, IndustryTemplate] = {
 
 
 def get_template(industry_name: str) -> IndustryTemplate:
-    """Return template for industry; fallback to Construction if unknown."""
-    return INDUSTRY_TEMPLATES.get(industry_name.strip(), _construction_template())
+    """
+    Return the IndustryTemplate for the given industry name.
+
+    Accepts any case and common aliases via normalize_industry (e.g. "tech" → Technology).
+    Falls back to Construction for unrecognised inputs so the pipeline always has a template.
+    Note: the CLI validates industries via _validate_and_normalize before this is ever called
+    in the run path, so the fallback is only reached by direct callers (e.g. unit tests).
+    """
+    canonical = normalize_industry(industry_name)
+    return INDUSTRY_TEMPLATES.get(canonical or "", _construction_template())

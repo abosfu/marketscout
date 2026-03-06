@@ -50,10 +50,11 @@ htmlcov/
 .pytest_cache/
 .tox/
 
-# Cache (real fetched data)
+# Disk cache (live-fetched signals; never committed)
 .cache/
 
-# Generated output (sample data in data/ is kept)
-data/headlines.json
-data/strategy.json
+# Generated run output (written by `marketscout run`; never committed)
 out/
+
+# Zip archives created by `marketscout bundle`
+*.zip

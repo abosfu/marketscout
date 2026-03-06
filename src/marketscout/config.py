@@ -11,7 +11,6 @@ StrategyMode = Literal["mock", "llm", "auto"]
 # Defaults (env overrides below)
 DEFAULT_CITY = "Vancouver"
 DEFAULT_MAX_HEADLINES = 10
-DEFAULT_CACHE_TTL_SECONDS = 600  # 10 minutes (in-memory / API semantics)
 DEFAULT_DISK_CACHE_TTL_SECONDS = 3600  # 1 hour for .cache/marketscout
 DEFAULT_STRATEGY_MODE: StrategyMode = "auto"
 
@@ -41,11 +40,6 @@ def get_max_headlines() -> int:
     return _env_int("MARKETSCOUT_MAX_HEADLINES", DEFAULT_MAX_HEADLINES)
 
 
-def get_cache_ttl_seconds() -> int:
-    """Cache TTL in seconds (legacy/in-memory). Override with MARKETSCOUT_CACHE_TTL."""
-    return _env_int("MARKETSCOUT_CACHE_TTL", DEFAULT_CACHE_TTL_SECONDS)
-
-
 def get_disk_cache_ttl_seconds() -> int:
     """Disk cache TTL in seconds for .cache/marketscout. Override with MARKETSCOUT_DISK_CACHE_TTL."""
     return _env_int("MARKETSCOUT_DISK_CACHE_TTL", DEFAULT_DISK_CACHE_TTL_SECONDS)
@@ -62,8 +56,3 @@ def get_cache_dir() -> Path:
     if val and val.strip():
         return Path(val.strip())
     return Path.cwd() / ".cache" / "marketscout"
-
-
-def get_data_dir() -> Path:
-    """Repository data directory (for tests/fixtures only)."""
-    return Path(__file__).resolve().parent.parent.parent / "data"
