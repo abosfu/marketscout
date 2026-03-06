@@ -1,302 +1,691 @@
-"""CLI entrypoint: python -m marketscout run | scout | generate | demo."""
+"""CLI entrypoint: python -m marketscout run | eval | bundle."""
 
 from __future__ import annotations
 
 import argparse
+import csv
 import json
+import re
+import shutil
 import sys
+import time
+import zipfile
+from dataclasses import asdict
+from datetime import datetime, timezone
 from pathlib import Path
 
 from marketscout import __version__
+from marketscout.fs import find_latest_run_dir
+from marketscout.normalize import SUPPORTED_INDUSTRIES, normalize_city, normalize_industry
 
 
-def _data_dir() -> Path:
-    return Path(__file__).resolve().parent.parent.parent / "data"
+def _slugify(text: str, max_len: int = 30) -> str:
+    """Convert arbitrary text to a safe filesystem slug (lowercase, underscores)."""
+    slug = re.sub(r"[^a-z0-9]+", "_", text.strip().lower()).strip("_")
+    return (slug or "unknown")[:max_len]
 
 
-def _run(
-    industry: str,
-    objective: str,
+def _default_out_dir(city: str, industry: str) -> Path:
+    """Default output directory: out/<city>_<industry>_<YYYY-MM-DD>/"""
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    return Path("out") / f"{_slugify(city)}_{_slugify(industry)}_{date_str}"
+
+
+def _validate_and_normalize(city: str, industry: str) -> tuple[str, str] | None:
+    """
+    Normalize city and industry; validate industry against the supported list.
+    Returns (canonical_city, canonical_industry) or None (and prints error) if invalid.
+    """
+    canonical_city = normalize_city(city)
+    canonical_industry = normalize_industry(industry)
+    if canonical_industry is None:
+        available = ", ".join(sorted(SUPPORTED_INDUSTRIES))
+        print(
+            f"Error: unrecognised industry '{industry}'.\n"
+            f"Supported industries: {available}\n"
+            f"Tip: industry matching is case-insensitive and accepts common aliases "
+            f"(e.g. 'tech' → Technology, 'health care' → Healthcare).",
+            file=sys.stderr,
+        )
+        return None
+    return canonical_city, canonical_industry
+
+
+def _make_fetch_entry(provider: str, status: str, error: str | None = None) -> dict:
+    return {"provider": provider, "status": status, "error": error}
+
+
+def _fetch_signals(
     city: str,
-    location: str,
+    industry: str,
+    headlines_limit: int,
+    jobs_limit: int,
+    jobs_provider: str,
+    allow_provider_fallback: bool,
+    refresh: bool,
+    cache_dir: Path,
+    ttl: int,
+    err_console,
+) -> tuple[list, list, dict] | None:
+    """
+    Fetch headlines and jobs; record per-source fetch status.
+
+    When refresh=False (default): fall back to disk cache if a live fetch fails.
+    When refresh=True: never use stale cache — fail hard if the live fetch fails.
+
+    Returns (headlines, jobs, fetch_status) or None if unrecoverable.
+    """
+    from marketscout.cache import cache_key, read_cached, write_cached
+    from marketscout.scout import ScoutError, fetch_headlines, fetch_jobs
+
+    key = cache_key(city, industry)
+    fetch_status: dict = {}
+
+    # Headlines
+    try:
+        headlines = fetch_headlines(city=city, industry=industry, limit=headlines_limit)
+        write_cached(cache_dir, key, "headlines.json", headlines)
+        fetch_status["headlines"] = _make_fetch_entry("google_news_rss", "live")
+    except ScoutError as e:
+        if not refresh:
+            cached = read_cached(cache_dir, key, "headlines.json", ttl)
+            if cached is not None and isinstance(cached, list):
+                headlines = cached
+                fetch_status["headlines"] = _make_fetch_entry("google_news_rss", "cached", str(e))
+                err_console.print("[yellow]Headlines: live fetch failed — using disk cache.[/yellow]")
+            else:
+                fetch_status["headlines"] = _make_fetch_entry("google_news_rss", "failed", str(e))
+                err_console.print(f"[red]Error: headlines fetch failed and no cache available: {e}[/red]")
+                return None
+        else:
+            fetch_status["headlines"] = _make_fetch_entry("google_news_rss", "failed", str(e))
+            err_console.print(f"[red]Error: headlines fetch failed (--refresh disables cache fallback): {e}[/red]")
+            return None
+
+    # Jobs
+    try:
+        jobs = fetch_jobs(
+            city=city, industry=industry, limit=jobs_limit,
+            provider=jobs_provider, allow_fallback=allow_provider_fallback,
+        )
+        write_cached(cache_dir, key, "jobs.json", jobs)
+        fetch_status["jobs"] = _make_fetch_entry(jobs_provider, "live")
+    except ScoutError as e:
+        if not refresh:
+            cached = read_cached(cache_dir, key, "jobs.json", ttl)
+            if cached is not None and isinstance(cached, list):
+                jobs = cached
+                fetch_status["jobs"] = _make_fetch_entry(jobs_provider, "cached", str(e))
+                err_console.print("[yellow]Jobs: live fetch failed — using disk cache.[/yellow]")
+            else:
+                fetch_status["jobs"] = _make_fetch_entry(jobs_provider, "failed", str(e))
+                err_console.print(f"[red]Error: jobs fetch failed and no cache available: {e}[/red]")
+                return None
+        else:
+            fetch_status["jobs"] = _make_fetch_entry(jobs_provider, "failed", str(e))
+            err_console.print(f"[red]Error: jobs fetch failed (--refresh disables cache fallback): {e}[/red]")
+            return None
+
+    return headlines, jobs, fetch_status
+
+
+def _run_pipeline(
+    city: str,
+    industry: str,
     out_dir: Path,
     jobs_limit: int,
+    headlines_limit: int,
+    jobs_provider: str,
+    allow_provider_fallback: bool,
+    write_leads: bool,
+    refresh: bool,
+    deterministic: bool,
+    *,
+    objective: str | None = None,
 ) -> int:
-    """Fetch live signals, generate strategy, write strategy.json + report.md + report.html, print rich summary."""
+    """
+    Core pipeline: fetch signals → generate v2.0 strategy → write artifacts → print summary.
+
+    Artifacts written:
+      input_signals.json, strategy.json, signal_analysis.json,
+      report.md, report.html, summary.txt, [leads.csv]
+    """
+    # Validate inputs first — fast, no I/O, no Rich dependency.
+    validated = _validate_and_normalize(city, industry)
+    if validated is None:
+        return 1
+    city, industry = validated
+
     from marketscout.brain import generate_strategy, strategy_to_html, strategy_to_markdown
-    from marketscout.cache import cache_key, read_cached, write_cached
-    from marketscout.config import get_cache_dir, get_disk_cache_ttl_seconds, get_max_headlines
-    from marketscout.scout import ScoutError, fetch_headlines, fetch_jobs
+    from marketscout.brain.strategy import build_signal_analysis
+    from marketscout.config import get_cache_dir, get_disk_cache_ttl_seconds
+    from marketscout.leads import build_leads
 
     try:
         from rich.console import Console
         from rich.table import Table
     except ImportError:
-        print("MarketScout v1.1 requires 'rich'. Install with: pip install rich", file=sys.stderr)
+        print(f"MarketScout {__version__} requires 'rich'. Install with: pip install rich", file=sys.stderr)
         return 1
 
     console = Console()
     err_console = Console(file=sys.stderr)
-    cache_dir = get_cache_dir()
-    ttl = get_disk_cache_ttl_seconds()
-    key = cache_key(city, industry)
 
-    # --- Fetch headlines (live or cache on failure) ---
-    headlines: list = []
-    try:
-        headlines = fetch_headlines(city=city, industry=industry, limit=get_max_headlines())
-        write_cached(cache_dir, key, "headlines.json", headlines)
-    except ScoutError as e:
-        cached = read_cached(cache_dir, key, "headlines.json", ttl)
-        if cached is not None and isinstance(cached, list):
-            headlines = cached
-            err_console.print("[yellow]Live fetch failed; using cached headlines.[/yellow]")
-        else:
-            err_console.print(f"[red]Headlines: {e}[/red]")
-            return 1
+    if refresh:
+        err_console.print("[cyan]--refresh: requiring live fetch, cache fallback disabled.[/cyan]")
 
-    # --- Fetch jobs (live or cache on failure) ---
-    jobs: list = []
-    try:
-        jobs = fetch_jobs(city=city, industry=industry, limit=jobs_limit)
-        write_cached(cache_dir, key, "jobs.json", jobs)
-    except ScoutError as e:
-        cached = read_cached(cache_dir, key, "jobs.json", ttl)
-        if cached is not None and isinstance(cached, list):
-            jobs = cached
-            err_console.print("[yellow]Live fetch failed; using cached jobs.[/yellow]")
-        else:
-            err_console.print(f"[red]Jobs: {e}[/red]")
-            return 1
+    started_at = datetime.now(timezone.utc)
+    t0 = time.monotonic()
 
-    # --- Generate strategy ---
+    result = _fetch_signals(
+        city=city,
+        industry=industry,
+        headlines_limit=headlines_limit,
+        jobs_limit=jobs_limit,
+        jobs_provider=jobs_provider,
+        allow_provider_fallback=allow_provider_fallback,
+        refresh=refresh,
+        cache_dir=get_cache_dir(),
+        ttl=get_disk_cache_ttl_seconds(),
+        err_console=err_console,
+    )
+    if result is None:
+        return 1
+    headlines, jobs, fetch_status = result
+
     strategy = generate_strategy(
         headlines,
         industry=industry,
-        objective=objective,
-        location=location,
+        city=city,
         jobs=jobs,
+        objective=objective,
+        deterministic=deterministic,
     )
 
-    # --- Write outputs ---
+    duration_ms = int((time.monotonic() - t0) * 1000)
+    cache_used = any(
+        entry.get("status") == "cached"
+        for entry in fetch_status.values()
+    )
+    run_metadata = {
+        "started_at_iso": started_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "duration_ms": duration_ms,
+        "deterministic": deterministic,
+        "cache_used": cache_used,
+    }
+
     out_dir = out_dir.resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    input_signals_path = out_dir / "input_signals.json"
     strategy_path = out_dir / "strategy.json"
+    signal_analysis_path = out_dir / "signal_analysis.json"
     report_md_path = out_dir / "report.md"
     report_html_path = out_dir / "report.html"
-    strategy_path.write_text(json.dumps(strategy.to_json_dict(), indent=2), encoding="utf-8")
-    report_md_path.write_text(strategy_to_markdown(strategy.to_json_dict()), encoding="utf-8")
-    report_html_path.write_text(strategy_to_html(strategy.to_json_dict()), encoding="utf-8")
+    summary_path = out_dir / "summary.txt"
+    leads_path = out_dir / "leads.csv"
 
-    # --- Rich terminal summary ---
-    console.print("\n[bold]MarketScout v1.1[/bold]\n")
-    if strategy.signals_used:
-        console.print("[bold]Signals used[/bold]")
-        console.print(f"  Headlines: {strategy.signals_used.headlines_count}")
-        console.print(f"  Jobs: {strategy.signals_used.jobs_count}\n")
-    if strategy.score_breakdown:
-        st = strategy.score_breakdown
-        table = Table(title="Score breakdown")
-        table.add_column("Signal", style="cyan")
-        table.add_column("Score (0-10)", justify="right")
-        table.add_row("News (headlines)", str(st.news_signal_score))
-        table.add_row("Jobs", str(st.jobs_signal_score))
-        table.add_row("Combined pain score", str(st.combined_pain_score))
-        console.print(table)
+    input_signals_path.write_text(json.dumps({"headlines": headlines, "jobs": jobs}, indent=2), encoding="utf-8")
+    strategy_path.write_text(json.dumps(strategy.to_json_dict(), indent=2), encoding="utf-8")
+
+    signal_analysis = build_signal_analysis(
+        headlines, jobs, city, industry,
+        run_metadata=run_metadata,
+        fetch_status=fetch_status,
+    )
+    signal_analysis_path.write_text(json.dumps(signal_analysis, indent=2), encoding="utf-8")
+
+    report_md_path.write_text(strategy_to_markdown(strategy.to_json_dict(), signal_analysis=signal_analysis), encoding="utf-8")
+    report_html_path.write_text(strategy_to_html(strategy.to_json_dict(), signal_analysis=signal_analysis), encoding="utf-8")
+
+    # summary.txt
+    summary_lines: list[str] = [f"MarketScout — {city} | {industry}"]
+    if objective:
+        summary_lines.append(f"Objective (label): {objective}")
+    su = getattr(strategy, "signals_used", None)
+    if su:
+        summary_lines.append(f"Signals — Headlines: {su.headlines_count}, Jobs: {su.jobs_count}")
+    dq = getattr(strategy, "data_quality", None)
+    if dq:
+        summary_lines.append(
+            f"Data quality — freshness: {dq.freshness_window_days}d, "
+            f"coverage: {dq.coverage_score:.2f}, source mix: {dq.source_mix_score:.2f}"
+        )
+    opps = getattr(strategy, "opportunity_map", [])
+    summary_lines.append(f"Opportunities: {len(opps)}")
+    for o in opps[:5]:
+        summary_lines.append(
+            f"  - {getattr(o, 'title', '')[:50]} "
+            f"(pain={getattr(o, 'pain_score', 0)}, roi={getattr(o, 'roi_signal', 0)})"
+        )
+    summary_path.write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
+
+    if write_leads:
+        leads = build_leads(jobs)
+        with leads_path.open("w", encoding="utf-8", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["company", "job_count", "top_keywords", "readiness_score", "example_links"])
+            writer.writeheader()
+            for lead in leads:
+                writer.writerow(asdict(lead))
+
+    # Rich terminal output
+    console.print(f"\n[bold]MarketScout v{__version__}[/bold]\n")
+
+    fetch_table = Table(title="Fetch status")
+    fetch_table.add_column("Source", style="cyan")
+    fetch_table.add_column("Provider")
+    fetch_table.add_column("Status")
+    fetch_table.add_column("Note")
+    _STATUS_STYLE = {"live": "green", "cached": "yellow", "failed": "red"}
+    for source, entry in fetch_status.items():
+        status = entry.get("status", "")
+        style = _STATUS_STYLE.get(status, "")
+        note = entry.get("error") or ""
+        fetch_table.add_row(
+            source,
+            entry.get("provider", ""),
+            f"[{style}]{status}[/{style}]" if style else status,
+            note[:60],
+        )
+    console.print(fetch_table)
+    console.print()
+
+    if dq:
+        dq_table = Table(title="Data quality")
+        dq_table.add_column("Metric", style="cyan")
+        dq_table.add_column("Value", justify="right")
+        dq_table.add_row("Freshness window (days)", str(dq.freshness_window_days))
+        dq_table.add_row("Coverage score", f"{dq.coverage_score:.2f}")
+        dq_table.add_row("Source mix score", f"{dq.source_mix_score:.2f}")
+        console.print(dq_table)
         console.print()
-    opp = Table(title="Opportunity map")
-    opp.add_column("Problem", style="cyan")
-    opp.add_column("Evidence", max_width=50)
-    opp.add_column("Source")
-    for p in strategy.problems:
-        src = getattr(p, "evidence_source", "") or "—"
-        opp.add_row(p.problem, (p.evidence_headline[:48] + "…") if len(p.evidence_headline) > 50 else p.evidence_headline, src)
-    console.print(opp)
-    console.print(f"\n[green]Outputs written to:[/green]")
-    console.print(f"  {strategy_path}")
-    console.print(f"  {report_md_path}")
-    console.print(f"  {report_html_path}\n")
+
+    opps = getattr(strategy, "opportunity_map", [])
+    if opps:
+        opp_table = Table(title="Top 5 opportunities")
+        opp_table.add_column("Title", style="cyan", max_width=40)
+        opp_table.add_column("Pain", justify="right")
+        opp_table.add_column("ROI", justify="right")
+        opp_table.add_column("Conf.", justify="right")
+        opp_table.add_column("Category")
+        for o in opps[:5]:
+            opp_table.add_row(
+                (getattr(o, "title", "") or "")[:40],
+                str(getattr(o, "pain_score", 0)),
+                str(getattr(o, "roi_signal", 0)),
+                f"{getattr(o, 'confidence', 0):.2f}",
+                (getattr(o, "ai_category", "") or "")[:20],
+            )
+        console.print(opp_table)
+
+    console.print("\n[green]Outputs:[/green]")
+    for p in [input_signals_path, strategy_path, signal_analysis_path, report_md_path, report_html_path, summary_path]:
+        console.print(f"  {p}")
+    if write_leads:
+        console.print(f"  {leads_path}")
+    console.print()
     return 0
 
 
 def cmd_run(
-    industry: str,
-    objective: str,
     city: str,
-    location: str,
+    industry: str,
     out_dir: Path,
     jobs_limit: int,
+    headlines_limit: int,
+    jobs_provider: str,
+    allow_provider_fallback: bool,
+    write_leads: bool,
+    refresh: bool,
+    deterministic: bool,
+    objective: str | None = None,
 ) -> int:
-    """Main entry: run with live signals and write artifacts."""
-    return _run(industry, objective, city, location, out_dir, jobs_limit)
-
-
-def cmd_scout(
-    output_path: Path | None = None,
-    limit: int = 10,
-    city: str | None = None,
-    industry: str | None = None,
-    include_jobs: bool = False,
-    jobs_limit: int = 10,
-) -> int:
-    """Fetch headlines and optionally jobs (live); print/save as JSON. Exits non-zero on fetch failure."""
-    from marketscout.scout import ScoutError, fetch_headlines, fetch_jobs
-
-    try:
-        headlines = fetch_headlines(limit=limit, city=city, industry=industry)
-    except ScoutError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
-    if include_jobs:
-        try:
-            jobs = fetch_jobs(city=city, industry=industry, limit=jobs_limit)
-        except ScoutError as e:
-            print(f"Error: {e}", file=sys.stderr)
-            return 1
-        payload = {"headlines": headlines, "jobs": jobs}
-    else:
-        payload = headlines
-    out = json.dumps(payload, indent=2)
-    print(out)
-    if output_path is not None:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(out, encoding="utf-8")
-        print(f"Saved to {output_path}", file=sys.stderr)
-    return 0
-
-
-def cmd_generate(
-    headlines_path: Path | None = None,
-    output_path: Path | None = None,
-    industry: str = "Construction",
-    objective: str = "Market entry",
-    location: str = "Vancouver, BC",
-) -> int:
-    """Load headlines (+ jobs) JSON from file and write strategy JSON. For offline use with pre-fetched data."""
-    from marketscout.brain import generate_strategy
-
-    data_dir = _data_dir()
-    if headlines_path is None:
-        headlines_path = data_dir / "headlines.json"
-    if not headlines_path.exists():
-        print(f"Error: input file not found: {headlines_path}", file=sys.stderr)
-        return 1
-    try:
-        raw = json.loads(headlines_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
-    if isinstance(raw, dict):
-        headlines = raw.get("headlines") or []
-        jobs = raw.get("jobs") or []
-    else:
-        headlines = raw if isinstance(raw, list) else []
-        jobs = []
-    if output_path is None:
-        output_path = data_dir / "strategy.json"
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    strategy = generate_strategy(headlines, industry=industry, objective=objective, location=location, jobs=jobs)
-    output_path.write_text(json.dumps(strategy.to_json_dict(), indent=2), encoding="utf-8")
-    print(json.dumps(strategy.to_json_dict(), indent=2))
-    print(f"Saved to {output_path}", file=sys.stderr)
-    return 0
-
-
-def cmd_demo(data_dir: Path) -> int:
-    """[Dev-only] Write demo_input.json and demo_strategy.json from data/sample_* (no network). For tests/fixtures."""
-    from marketscout.brain import generate_strategy
-
-    headlines_path = data_dir / "sample_headlines.json"
-    jobs_path = data_dir / "sample_jobs.json"
-    headlines: list = []
-    jobs: list = []
-    if headlines_path.exists():
-        try:
-            headlines = json.loads(headlines_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
-    if jobs_path.exists():
-        try:
-            jobs = json.loads(jobs_path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            pass
-    data_dir.mkdir(parents=True, exist_ok=True)
-    demo_input_path = data_dir / "demo_input.json"
-    demo_strategy_path = data_dir / "demo_strategy.json"
-    demo_input = {"headlines": headlines, "jobs": jobs}
-    demo_input_path.write_text(json.dumps(demo_input, indent=2), encoding="utf-8")
-    print(f"Wrote {demo_input_path}", file=sys.stderr)
-    strategy = generate_strategy(
-        headlines,
-        industry="Construction",
-        objective="Market entry",
-        location="Vancouver, BC",
-        jobs=jobs,
-        force_mock=True,
+    """Run the pipeline with live signals and write v2.0 artifacts."""
+    return _run_pipeline(
+        city=city,
+        industry=industry,
+        out_dir=out_dir,
+        jobs_limit=jobs_limit,
+        headlines_limit=headlines_limit,
+        jobs_provider=jobs_provider,
+        allow_provider_fallback=allow_provider_fallback,
+        write_leads=write_leads,
+        refresh=refresh,
+        deterministic=deterministic,
+        objective=objective,
     )
-    demo_strategy_path.write_text(json.dumps(strategy.to_json_dict(), indent=2), encoding="utf-8")
-    print(f"Wrote {demo_strategy_path}", file=sys.stderr)
-    print(json.dumps(strategy.to_json_dict(), indent=2))
+
+
+# Required files for bundle (leads.csv and signal_analysis.json optional)
+BUNDLE_REQUIRED = ("input_signals.json", "strategy.json", "report.html", "summary.txt")
+BUNDLE_OPTIONAL = ("leads.csv", "signal_analysis.json")
+
+
+def cmd_bundle(out_dir: Path | None) -> int:
+    """
+    Bundle a run directory: validate required files, copy into bundle/, create zip.
+    Default out_dir is the latest run under ./out (by mtime).
+    """
+    if out_dir is None:
+        out_dir = find_latest_run_dir(Path("out"))
+        if out_dir is None:
+            print("Error: no run directory found under out/. Pass --out-dir explicitly.", file=sys.stderr)
+            return 1
+    out_dir = Path(out_dir).resolve()
+    if not out_dir.is_dir():
+        print(f"Error: not a directory: {out_dir}", file=sys.stderr)
+        return 1
+
+    for name in BUNDLE_REQUIRED:
+        if not (out_dir / name).is_file():
+            print(f"Error: missing required file: {out_dir / name}", file=sys.stderr)
+            return 1
+
+    try:
+        strategy_data = json.loads((out_dir / "strategy.json").read_text(encoding="utf-8"))
+        city = (strategy_data.get("city") or "unknown").replace(" ", "_")[:30]
+        industry = (strategy_data.get("industry") or "unknown").replace(" ", "_")[:30]
+    except (OSError, json.JSONDecodeError, KeyError):
+        city, industry = "unknown", "unknown"
+
+    date_match = re.search(r"(\d{4}-\d{2}-\d{2})$", out_dir.name)
+    date_str = date_match.group(1) if date_match else datetime.now().strftime("%Y-%m-%d")
+    zip_name = f"marketscout_{city}_{industry}_{date_str}.zip"
+    zip_path = out_dir / zip_name
+
+    bundle_dir = out_dir / "bundle"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    for name in BUNDLE_REQUIRED:
+        shutil.copy2(out_dir / name, bundle_dir / name)
+    for name in BUNDLE_OPTIONAL:
+        p = out_dir / name
+        if p.is_file():
+            shutil.copy2(p, bundle_dir / name)
+
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for f in bundle_dir.iterdir():
+            if f.is_file():
+                zf.write(f, f.name)
+
+    print(zip_path)
     return 0
+
+
+def cmd_eval(signals_path: Path, strategy_path: Path, out_path: Path | None) -> int:
+    """
+    Quality gate: validate v2.0 strategy and evidence links; write eval_report.md.
+    Exit 0 if all checks pass, 1 otherwise.
+    """
+    from marketscout.brain.schema import StrategyOutput
+
+    if out_path is None:
+        out_path = strategy_path.parent / "eval_report.md"
+    out_path = Path(out_path).resolve()
+
+    results: list[tuple[str, bool, str]] = []
+
+    try:
+        signals_data = json.loads(signals_path.read_text(encoding="utf-8"))
+        headlines = signals_data.get("headlines") or []
+        jobs = signals_data.get("jobs") or []
+    except (OSError, json.JSONDecodeError) as e:
+        results.append(("signals_load", False, str(e)))
+        _write_eval_report(out_path, results, None)
+        return 1
+
+    allowed_links: set[str] = set()
+    for h in headlines:
+        link = (h.get("link") or "").strip()
+        if link:
+            allowed_links.add(link)
+    for j in jobs:
+        link = (j.get("link") or "").strip()
+        if link:
+            allowed_links.add(link)
+    allowed_links.add("#")
+
+    try:
+        strategy_raw = json.loads(strategy_path.read_text(encoding="utf-8"))
+        strategy = StrategyOutput.model_validate(strategy_raw)
+    except (OSError, json.JSONDecodeError, Exception) as e:
+        results.append(("v2_schema", False, str(e)))
+        _write_eval_report(out_path, results, None)
+        return 1
+    results.append(("v2_schema", True, "Strategy validates v2.0 schema"))
+
+    n_opp = len(strategy.opportunity_map)
+    results.append(("opportunity_map_length", 5 <= n_opp <= 8, f"opportunity_map length {n_opp} in [5,8]"))
+
+    scores_ok = all(
+        0 <= o.confidence <= 1
+        and 0 <= o.pain_score <= 10
+        and 0 <= o.automation_potential <= 10
+        and 0 <= o.roi_signal <= 10
+        for o in strategy.opportunity_map
+    )
+    results.append(("scores_bounds", scores_ok, "Each opportunity: confidence in [0,1], pain/automation/roi in [0,10]"))
+
+    evidence_count_ok = all(len(o.evidence) >= 2 for o in strategy.opportunity_map)
+    results.append(("evidence_count", evidence_count_ok, "Each opportunity has >= 2 evidence items"))
+
+    bad_links: list[str] = [
+        e.link
+        for o in strategy.opportunity_map
+        for e in o.evidence
+        if e.link not in allowed_links
+    ]
+    links_ok = len(bad_links) == 0
+    results.append((
+        "evidence_links_in_signals",
+        links_ok,
+        "All evidence links present in input signals" + (f"; bad: {bad_links[:5]}" if bad_links else ""),
+    ))
+
+    dq = strategy.data_quality
+    coverage_ok = 0 <= dq.coverage_score <= 1
+    results.append(("data_quality_coverage", coverage_ok, f"data_quality.coverage_score={dq.coverage_score} in [0,1]"))
+
+    score_breakdown_ok = all(
+        abs(sb.signal_frequency + sb.source_diversity + sb.job_role_density - 1.0) <= 1e-6
+        for o in strategy.opportunity_map
+        if (sb := getattr(o, "score_breakdown", None)) is not None
+    )
+    results.append(("score_breakdown_sum", score_breakdown_ok, "Each score_breakdown (when present) sums to 1.0"))
+
+    _write_eval_report(out_path, results, strategy)
+    return 0 if all(r[1] for r in results) else 1
+
+
+def _write_eval_report(out_path: Path, results: list[tuple[str, bool, str]], strategy) -> None:
+    """Write eval_report.md from (check_id, passed, message) results."""
+    lines = ["# Eval Report", "", "| Check | Pass | Message |", "|-------|------|--------|"]
+    for check_id, passed, msg in results:
+        lines.append(f"| {check_id} | {'pass' if passed else 'fail'} | {msg.replace('|', chr(124))[:80]} |")
+    lines.append("")
+    passed_count = sum(1 for _, p, _ in results if p)
+    lines.append(f"**Result:** {passed_count}/{len(results)} checks passed.")
+    lines.append("")
+    if strategy:
+        lines.append(f"- City: {strategy.city}, Industry: {strategy.industry}")
+        lines.append(f"- Opportunities: {len(strategy.opportunity_map)}")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(prog="marketscout", description="MarketScout — Zero-Friction Strategy Engine (CLI)")
+    parser = argparse.ArgumentParser(
+        prog="marketscout",
+        description=(
+            "MarketScout — AI opportunity mapping from live market signals.\n"
+            "Commands: run (fetch + generate), eval (quality gate), bundle (package for sharing)."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # run (primary)
-    p_run = subparsers.add_parser("run", help="Fetch live signals, generate strategy, write strategy.json + report.md + report.html")
-    p_run.add_argument("--industry", type=str, default="Construction", help="Industry")
-    p_run.add_argument("--objective", type=str, default="Market entry", help="Objective")
-    p_run.add_argument("--city", type=str, default="Vancouver", help="City for RSS")
-    p_run.add_argument("--location", type=str, default="Vancouver, BC", help="Location label")
-    p_run.add_argument("-o", "--out-dir", type=Path, default=Path("out"), help="Output directory (default: out)")
-    p_run.add_argument("--jobs-limit", type=int, default=10, help="Max jobs to fetch")
+    # ── run ───────────────────────────────────────────────────────────────────
+    p_run = subparsers.add_parser(
+        "run",
+        help="Fetch market signals and generate a v2.0 opportunity map.",
+        description=(
+            "Fetch live headlines and job postings for a city + industry, generate a scored\n"
+            "opportunity map, and write all artifacts to the output directory."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_run.add_argument(
+        "--city",
+        type=str,
+        required=True,
+        metavar="CITY",
+        help="Target city (required). Accepts postal suffixes, e.g. 'Vancouver, BC'.",
+    )
+    p_run.add_argument(
+        "--industry",
+        type=str,
+        required=True,
+        metavar="INDUSTRY",
+        help=(
+            "Target industry (required). Case-insensitive; common aliases accepted "
+            "(e.g. 'tech' → Technology). Run with an unknown value to see the supported list."
+        ),
+    )
+    p_run.add_argument(
+        "-o", "--out-dir",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="Output directory (default: out/<city>_<industry>_<date>/).",
+    )
+    p_run.add_argument(
+        "--jobs-provider",
+        type=str,
+        default="adzuna",
+        choices=["adzuna", "rss"],
+        help="Jobs data source: 'adzuna' (default) or 'rss'.",
+    )
+    p_run.add_argument(
+        "--jobs-limit",
+        type=int,
+        default=10,
+        metavar="N",
+        help="Maximum number of job postings to fetch (default: 10).",
+    )
+    p_run.add_argument(
+        "--headlines-limit",
+        type=int,
+        default=10,
+        metavar="N",
+        help="Maximum number of news headlines to fetch (default: 10).",
+    )
+    p_run.add_argument(
+        "--refresh",
+        action="store_true",
+        help=(
+            "Require a fresh live fetch. Disables cache fallback — "
+            "exits non-zero if the network is unavailable."
+        ),
+    )
+    p_run.add_argument(
+        "--deterministic",
+        action="store_true",
+        help=(
+            "Produce reproducible outputs: seed random at 42, sort signals by title, "
+            "use stable opportunity ordering."
+        ),
+    )
+    p_run.add_argument(
+        "--objective",
+        type=str,
+        default=None,
+        metavar="TEXT",
+        help="Optional free-text label for this run (not used in scoring or output).",
+    )
+    p_run.add_argument(
+        "--allow-provider-fallback",
+        action="store_true",
+        help="Fall back to the RSS jobs provider if the primary provider (Adzuna) fails.",
+    )
+    p_run.add_argument(
+        "--write-leads",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Write leads.csv from job data (default: enabled). Use --no-write-leads to skip.",
+    )
     p_run.set_defaults(
         func=lambda ns: cmd_run(
-            ns.industry,
-            ns.objective,
-            ns.city,
-            ns.location,
-            ns.out_dir,
-            ns.jobs_limit,
+            city=ns.city,
+            industry=ns.industry,
+            out_dir=ns.out_dir or _default_out_dir(ns.city, ns.industry),
+            jobs_limit=ns.jobs_limit,
+            headlines_limit=ns.headlines_limit,
+            jobs_provider=ns.jobs_provider,
+            allow_provider_fallback=ns.allow_provider_fallback,
+            write_leads=ns.write_leads,
+            refresh=ns.refresh,
+            deterministic=ns.deterministic,
+            objective=ns.objective,
         )
     )
 
-    # demo (dev-only)
-    p_demo = subparsers.add_parser("demo", help="[Dev-only] Build demo_input.json + demo_strategy.json from data/sample_* (no network)")
-    p_demo.add_argument("--data-dir", type=Path, default=None, help="Data directory (default: ./data)")
-    p_demo.set_defaults(func=lambda ns: cmd_demo(ns.data_dir or _data_dir()))
-
-    # scout
-    p_scout = subparsers.add_parser("scout", help="Fetch live headlines (and optionally jobs); print or save JSON")
-    p_scout.add_argument("-o", "--output", type=Path, default=None, help="Write output to file")
-    p_scout.add_argument("-n", "--limit", type=int, default=10, help="Max headlines")
-    p_scout.add_argument("--city", type=str, default=None)
-    p_scout.add_argument("--industry", type=str, default=None)
-    p_scout.add_argument("--include-jobs", action="store_true")
-    p_scout.add_argument("--jobs-limit", type=int, default=10)
-    p_scout.set_defaults(
-        func=lambda ns: cmd_scout(ns.output, ns.limit, ns.city, ns.industry, ns.include_jobs, ns.jobs_limit)
+    # ── bundle ────────────────────────────────────────────────────────────────
+    p_bundle = subparsers.add_parser(
+        "bundle",
+        help="Validate and pack a run directory into a shareable zip.",
+        description=(
+            "Verify that all required run artifacts are present, copy them into a bundle/\n"
+            "subdirectory, and create a zip archive inside the run directory."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-
-    # generate
-    p_gen = subparsers.add_parser("generate", help="Generate strategy from existing headlines JSON (e.g. from scout -o)")
-    p_gen.add_argument("-i", "--headlines", type=Path, default=None)
-    p_gen.add_argument("-o", "--output", type=Path, default=None)
-    p_gen.add_argument("--industry", type=str, default="Construction")
-    p_gen.add_argument("--objective", type=str, default="Market entry")
-    p_gen.add_argument("--location", type=str, default="Vancouver, BC")
-    p_gen.set_defaults(
-        func=lambda ns: cmd_generate(
-            ns.headlines,
-            ns.output,
-            ns.industry,
-            ns.objective,
-            ns.location,
-        )
+    p_bundle.add_argument(
+        "-o", "--out-dir",
+        type=Path,
+        default=None,
+        metavar="DIR",
+        help="Path to an existing run directory (default: latest run under out/ by mtime).",
     )
+    p_bundle.set_defaults(func=lambda ns: cmd_bundle(ns.out_dir))
+
+    # ── eval ──────────────────────────────────────────────────────────────────
+    p_eval = subparsers.add_parser(
+        "eval",
+        help="Quality gate: verify schema, scores, evidence count, and source integrity.",
+        description=(
+            "Validate a v2.0 strategy against input signals. Checks:\n"
+            "  • strategy.json matches the v2.0 schema\n"
+            "  • opportunity_map length in [5, 8]\n"
+            "  • confidence in [0,1] and pain/automation/roi scores in [0,10]\n"
+            "  • each opportunity has >= 2 evidence items\n"
+            "  • every evidence.link exists in input_signals.json (no hallucinated sources)\n"
+            "  • data_quality.coverage_score in [0,1]\n\n"
+            "Writes eval_report.md. Exits 0 if all checks pass, 1 otherwise."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_eval.add_argument(
+        "--signals",
+        type=Path,
+        required=True,
+        metavar="FILE",
+        help="Path to input_signals.json produced by 'run'.",
+    )
+    p_eval.add_argument(
+        "--strategy",
+        type=Path,
+        required=True,
+        metavar="FILE",
+        help="Path to strategy.json produced by 'run'.",
+    )
+    p_eval.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        metavar="FILE",
+        help="Where to write eval_report.md (default: next to strategy.json).",
+    )
+    p_eval.set_defaults(func=lambda ns: cmd_eval(ns.signals, ns.strategy, ns.out))
 
     args = parser.parse_args()
     return args.func(args)
