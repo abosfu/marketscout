@@ -1,4 +1,4 @@
-"""Convert strategy JSON to a clean HTML report. Same sections as Markdown; minimal inline styling."""
+"""Convert strategy JSON (v2.0) to a clean HTML report. Same sections as Markdown; minimal inline styling."""
 
 from __future__ import annotations
 
@@ -18,10 +18,14 @@ a { color: #0066cc; }
 """
 
 
-def strategy_to_html(data: dict[str, Any] | StrategyOutput) -> str:
+def strategy_to_html(
+    data: dict[str, Any] | StrategyOutput,
+    *,
+    signal_analysis: dict[str, Any] | None = None,
+) -> str:
     """
-    Convert strategy to HTML. Accepts dict or StrategyOutput.
-    Validates first; on failure returns a minimal safe HTML page. Never raises.
+    Convert v2.0 strategy to HTML. Sections: Executive Summary, Signal Analysis (if provided),
+    Opportunity Map table, per-opportunity detail (with score breakdown), Leads summary, Sources.
     """
     try:
         if isinstance(data, StrategyOutput):
@@ -38,81 +42,132 @@ def strategy_to_html(data: dict[str, Any] | StrategyOutput) -> str:
     parts.append("<!DOCTYPE html><html><head><meta charset='utf-8'><title>MarketScout Strategy Report</title>")
     parts.append(f"<style>{_STYLE}</style></head><body>")
 
-    pain = getattr(strategy, "pain_score", 0)
-    n_problems = len(getattr(strategy, "problems", []))
+    city = getattr(strategy, "city", "")
+    industry = getattr(strategy, "industry", "")
+    dq = getattr(strategy, "data_quality", None)
     parts.append("<h1>Executive Summary</h1>")
-    parts.append(
-        f"<p>This strategy report has a <strong>Pain Score</strong> of {pain}/10 "
-        f"and identifies {n_problems} opportunity areas with evidence from recent headlines and job signals.</p>"
-    )
-
+    parts.append(f"<p><strong>City:</strong> {_escape(city)} &emsp; <strong>Industry:</strong> {_escape(industry)}</p>")
+    if dq is not None:
+        parts.append(
+            f"<p><strong>Data quality:</strong> freshness {getattr(dq, 'freshness_window_days', 0)} days | "
+            f"coverage {getattr(dq, 'coverage_score', 0):.2f} | source mix {getattr(dq, 'source_mix_score', 0):.2f}</p>"
+        )
     signals = getattr(strategy, "signals_used", None)
     if signals is not None:
-        parts.append("<h2>Signals Used</h2><ul>")
-        parts.append(f"<li><strong>Headlines count:</strong> {getattr(signals, 'headlines_count', 0)}</li>")
-        parts.append(f"<li><strong>Jobs count:</strong> {getattr(signals, 'jobs_count', 0)}</li>")
-        parts.append(f"<li><strong>Econ used:</strong> {getattr(signals, 'econ_used', False)}</li></ul>")
+        parts.append(
+            f"<p><strong>Signals:</strong> {getattr(signals, 'headlines_count', 0)} headlines, "
+            f"{getattr(signals, 'jobs_count', 0)} jobs, "
+            f"{getattr(signals, 'news_sources_count', 0)} news sources, "
+            f"{getattr(signals, 'job_companies_count', 0)} job companies.</p>"
+        )
 
-    breakdown = getattr(strategy, "score_breakdown", None)
-    if breakdown is not None:
-        parts.append("<h2>Score Breakdown</h2><ul>")
-        parts.append(f"<li><strong>News signal score (0-10):</strong> {getattr(breakdown, 'news_signal_score', 0)}</li>")
-        parts.append(f"<li><strong>Jobs signal score (0-10):</strong> {getattr(breakdown, 'jobs_signal_score', 0)}</li>")
-        parts.append(f"<li><strong>Combined pain score (1-10):</strong> {getattr(breakdown, 'combined_pain_score', 0)}</li>")
-        w = getattr(breakdown, "weights", {}) or {}
-        parts.append(f"<li><strong>Weights:</strong> {w}</li></ul>")
+    if signal_analysis:
+        parts.append("<h2>Signal Analysis</h2>")
+        sig = signal_analysis.get("signals") or {}
+        parts.append(
+            f"<p><strong>Headlines:</strong> {sig.get('headlines_count', 0)} | <strong>Jobs:</strong> {sig.get('jobs_count', 0)} | "
+            f"<strong>Unique news sources:</strong> {sig.get('unique_news_sources', 0)} | <strong>Unique companies:</strong> {sig.get('unique_companies', 0)}</p>"
+        )
 
+        fetch_status = signal_analysis.get("fetch_status") or {}
+        if fetch_status:
+            _STATUS_COLOR = {"live": "#2d7a2d", "cached": "#a06000", "failed": "#c0392b"}
+            parts.append(
+                "<p><strong>Fetch status:</strong></p>"
+                "<table><thead><tr><th>Source</th><th>Provider</th><th>Status</th><th>Note</th></tr></thead><tbody>"
+            )
+            for source, entry in fetch_status.items():
+                provider = _escape(entry.get("provider", ""))
+                status = entry.get("status", "")
+                color = _STATUS_COLOR.get(status, "#333")
+                note = _escape((entry.get("error") or "")[:80])
+                parts.append(
+                    f"<tr><td>{_escape(source)}</td><td>{provider}</td>"
+                    f"<td><span style='color:{color};font-weight:bold'>{_escape(status)}</span></td>"
+                    f"<td>{note}</td></tr>"
+                )
+            parts.append("</tbody></table>")
+
+        run_meta = signal_analysis.get("run_metadata") or {}
+        if run_meta:
+            parts.append(
+                f"<p><strong>Run:</strong> started {_escape(run_meta.get('started_at_iso', ''))} &nbsp;|&nbsp; "
+                f"{run_meta.get('duration_ms', 0)} ms &nbsp;|&nbsp; "
+                f"deterministic={run_meta.get('deterministic', False)} &nbsp;|&nbsp; "
+                f"cache_used={run_meta.get('cache_used', False)}</p>"
+            )
+
+        keyword_hits = signal_analysis.get("keyword_hits") or {}
+        if keyword_hits:
+            parts.append("<p><strong>Keyword hits (tag → count):</strong></p><ul>")
+            for tag, count in sorted(keyword_hits.items()):
+                parts.append(f"<li>{_escape(tag)}: {count}</li>")
+            parts.append("</ul>")
+        derived = signal_analysis.get("derived_tags") or {}
+        if derived:
+            parts.append("<p><strong>Derived tags:</strong></p><ul>")
+            for tag, count in sorted(derived.items()):
+                parts.append(f"<li>{_escape(tag)}: {count}</li>")
+            parts.append("</ul>")
+
+    opps = getattr(strategy, "opportunity_map", [])
     parts.append("<h2>Opportunity Map</h2>")
-    problems = getattr(strategy, "problems", [])
-    if problems:
-        parts.append("<table><thead><tr><th>Problem</th><th>Evidence</th><th>Link</th></tr></thead><tbody>")
-        for p in problems:
-            prob = _escape(getattr(p, "problem", ""))
-            head = _escape((getattr(p, "evidence_headline", "") or "")[:80])
-            if len(getattr(p, "evidence_headline", "") or "") > 80:
-                head += "..."
-            link = getattr(p, "evidence_link", "") or "#"
-            parts.append(f"<tr><td>{prob}</td><td>{head}</td><td><a href='{_escape(link)}'>{_escape(link[:50])}</a></td></tr>")
+    if opps:
+        parts.append(
+            "<table><thead><tr><th>Title</th><th>Pain</th><th>ROI signal</th><th>Confidence</th><th>Category</th></tr></thead><tbody>"
+        )
+        for o in opps:
+            title = _escape((getattr(o, "title", "") or "")[:50])
+            pain = getattr(o, "pain_score", 0)
+            roi = getattr(o, "roi_signal", 0)
+            conf = getattr(o, "confidence", 0)
+            cat = _escape(getattr(o, "ai_category", ""))
+            parts.append(f"<tr><td>{title}</td><td>{pain}</td><td>{roi}</td><td>{conf:.2f}</td><td>{cat}</td></tr>")
         parts.append("</tbody></table>")
     else:
-        parts.append("<p><em>No problems documented.</em></p>")
+        parts.append("<p><em>No opportunities.</em></p>")
 
-    parts.append("<h2>AI Matches</h2>")
-    for m in getattr(strategy, "ai_matches", []):
-        cat = _escape(getattr(m, "category", "Category"))
-        approach = _escape(getattr(m, "recommended_approach", ""))
-        parts.append(f"<h3>{cat}</h3><p>{approach}</p>")
+    for i, o in enumerate(opps, 1):
+        title = _escape(getattr(o, "title", "") or f"Opportunity {i}")
+        parts.append(f"<h3>{i}. {title}</h3>")
+        parts.append(f"<p><strong>Problem:</strong> {_escape(getattr(o, 'problem', ''))}</p>")
+        evidence_list = getattr(o, "evidence", []) or []
+        if evidence_list:
+            parts.append("<p><strong>Evidence:</strong></p><ul>")
+            for e in evidence_list:
+                tit = _escape((getattr(e, "title", "") or "")[:70])
+                link = getattr(e, "link", "") or "#"
+                src = getattr(e, "source", "")
+                parts.append(f"<li><a href='{_escape(link)}'>{tit}</a> ({src})</li>")
+            parts.append("</ul>")
+        bc = getattr(o, "business_case", None)
+        if bc:
+            parts.append(f"<p><strong>Business case:</strong> {_escape(getattr(bc, 'savings_range_annual', ''))}</p>")
+            assumptions = getattr(bc, "assumptions", []) or []
+            if assumptions:
+                parts.append("<ul>")
+                for a in assumptions:
+                    parts.append(f"<li>{_escape(a)}</li>")
+                parts.append("</ul>")
+        sb = getattr(o, "score_breakdown", None)
+        if sb is not None:
+            parts.append(
+                f"<p><strong>Score breakdown:</strong> signal_frequency={getattr(sb, 'signal_frequency', 0):.2f} | "
+                f"source_diversity={getattr(sb, 'source_diversity', 0):.2f} | job_role_density={getattr(sb, 'job_role_density', 0):.2f}</p>"
+            )
 
-    parts.append("<h2>30/60/90 Plan</h2>")
-    plan = getattr(strategy, "plan_30_60_90", [])
-    for phase in plan:
-        ph = _escape(getattr(phase, "phase", "Phase"))
-        actions = getattr(phase, "actions", [])
-        parts.append(f"<h3>{ph}</h3><ul>")
-        for a in actions:
-            parts.append(f"<li>{_escape(a)}</li>")
-        parts.append("</ul>")
-
-    parts.append("<h2>ROI Notes & Assumptions</h2>")
-    roi = getattr(strategy, "roi_notes", None)
-    if roi:
-        ranges = _escape(getattr(roi, "ranges", "") or "")
-        assumptions = getattr(roi, "assumptions", []) or []
-        parts.append(f"<p><strong>Ranges:</strong> {ranges}</p><p><strong>Assumptions:</strong></p><ul>")
-        for a in assumptions:
-            parts.append(f"<li>{_escape(a)}</li>")
-        parts.append("</ul>")
-    else:
-        parts.append("<p><em>No ROI notes.</em></p>")
+    parts.append("<h2>Leads</h2>")
+    parts.append("<p>See <strong>leads.csv</strong> for company-level leads (top companies by readiness).</p>")
 
     parts.append("<h2>Sources</h2><ul>")
     seen: set[str] = set()
-    for p in problems:
-        link = getattr(p, "evidence_link", "") or ""
-        if link and link != "#" and link not in seen:
-            seen.add(link)
-            head = (getattr(p, "evidence_headline", "") or link)[:60]
-            parts.append(f"<li><a href='{_escape(link)}'>{_escape(head)}</a></li>")
+    for o in opps:
+        for e in getattr(o, "evidence", []) or []:
+            link = getattr(e, "link", "") or ""
+            if link and link != "#" and link not in seen:
+                seen.add(link)
+                tit = (getattr(e, "title", "") or link)[:60]
+                parts.append(f"<li><a href='{_escape(link)}'>{_escape(tit)}</a></li>")
     parts.append("</ul>")
 
     parts.append("</body></html>")

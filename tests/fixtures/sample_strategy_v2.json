@@ -1,0 +1,89 @@
+{
+  "strategy_version": "2.0",
+  "city": "Vancouver",
+  "industry": "Construction",
+  "opportunity_map": [
+    {
+      "title": "Labor shortages and wage pressure",
+      "problem": "Labor shortages and wage pressure",
+      "ai_category": "Operational efficiency",
+      "evidence": [
+        {"title": "Vancouver construction labor shortage", "link": "https://example.com/1", "source": "headline"},
+        {"title": "Construction Coordinator", "link": "https://example.com/j1", "source": "job"}
+      ],
+      "pain_score": 6.5,
+      "automation_potential": 7.0,
+      "roi_signal": 5.0,
+      "confidence": 0.72,
+      "business_case": {"savings_range_annual": "$80k–$250k", "assumptions": ["Based on signal density"]},
+      "score_breakdown": {"signal_frequency": 0.5, "source_diversity": 0.3, "job_role_density": 0.2}
+    },
+    {
+      "title": "Interest rate and financing uncertainty",
+      "problem": "Interest rate and financing uncertainty",
+      "ai_category": "Cost reduction",
+      "evidence": [
+        {"title": "Interest rates hold steady", "link": "https://example.com/2", "source": "headline"}
+      ],
+      "pain_score": 4.0,
+      "automation_potential": 4.0,
+      "roi_signal": 3.0,
+      "confidence": 0.5,
+      "business_case": {"savings_range_annual": "$30k–$100k", "assumptions": []},
+      "score_breakdown": {"signal_frequency": 0.6, "source_diversity": 0.2, "job_role_density": 0.2}
+    },
+    {
+      "title": "Supply chain and logistics constraints",
+      "problem": "Supply chain and logistics constraints",
+      "ai_category": "Operational efficiency",
+      "evidence": [
+        {"title": "Supply chain delays hit Vancouver port", "link": "https://example.com/3", "source": "headline"}
+      ],
+      "pain_score": 5.0,
+      "automation_potential": 6.0,
+      "roi_signal": 4.0,
+      "confidence": 0.45,
+      "business_case": {"savings_range_annual": "$50k–$150k", "assumptions": []},
+      "score_breakdown": {"signal_frequency": 0.6, "source_diversity": 0.2, "job_role_density": 0.2}
+    },
+    {
+      "title": "Permitting and regulatory delays",
+      "problem": "Permitting and regulatory delays",
+      "ai_category": "Regulatory & permits",
+      "evidence": [
+        {"title": "City streamlines permit process", "link": "https://example.com/4", "source": "headline"}
+      ],
+      "pain_score": 4.5,
+      "automation_potential": 5.0,
+      "roi_signal": 3.5,
+      "confidence": 0.4,
+      "business_case": {"savings_range_annual": "$40k–$120k", "assumptions": []},
+      "score_breakdown": {"signal_frequency": 0.6, "source_diversity": 0.2, "job_role_density": 0.2}
+    },
+    {
+      "title": "Skills gap and workforce training",
+      "problem": "Skills gap and workforce training",
+      "ai_category": "Operational efficiency",
+      "evidence": [
+        {"title": "Skills gap in trades widens", "link": "https://example.com/5", "source": "headline"}
+      ],
+      "pain_score": 5.5,
+      "automation_potential": 6.5,
+      "roi_signal": 4.5,
+      "confidence": 0.5,
+      "business_case": {"savings_range_annual": "$60k–$180k", "assumptions": []},
+      "score_breakdown": {"signal_frequency": 0.6, "source_diversity": 0.2, "job_role_density": 0.2}
+    }
+  ],
+  "signals_used": {
+    "headlines_count": 5,
+    "jobs_count": 2,
+    "news_sources_count": 4,
+    "job_companies_count": 1
+  },
+  "data_quality": {
+    "freshness_window_days": 2,
+    "coverage_score": 0.75,
+    "source_mix_score": 0.6
+  }
+}

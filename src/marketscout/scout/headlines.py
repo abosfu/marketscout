@@ -10,18 +10,13 @@ from typing import NoReturn
 import requests
 
 from marketscout.config import get_default_city, get_max_headlines
+from marketscout.scout.errors import ScoutError
 
 GOOGLE_NEWS_RSS_BASE = "https://news.google.com/rss/search"
 DEFAULT_LIMIT = 10
 REQUEST_TIMEOUT = 15
 RETRIES = 2
 RETRY_BACKOFF = 1.0
-
-
-class ScoutError(Exception):
-    """Raised when Scout fetch or parse fails (no fallback)."""
-
-    pass
 
 
 def build_rss_url(
