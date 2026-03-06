@@ -6,9 +6,22 @@
 
 ## What it does
 
-MarketScout pulls real headlines (Google News RSS) and job listings (Adzuna or RSS), runs them through a deterministic strategy engine, and writes a complete analysis pack to disk. Every claim in the output is traceable to a source in `input_signals.json`. A built-in quality gate (`eval`) verifies that — no hallucinated links allowed.
+MarketScout takes two inputs — a city and an industry — and writes a complete analysis pack to disk. It fetches live headlines (Google News RSS) and job postings (Adzuna or RSS), maps them through industry keyword templates, and produces a scored, sourced opportunity map with no configuration beyond those two flags.
 
-**No sample data at runtime.** All fixture files live in `tests/fixtures/` and are never loaded by the CLI. If a live fetch fails, the CLI falls back to the disk cache (`.cache/marketscout/`) and records the fallback in `signal_analysis.json`.
+**Outputs:**
+
+- `strategy.json` — ranked opportunity map (5–8 items), each with pain score, ROI signal, confidence, and explainable `score_breakdown`
+- `report.md` / `report.html` — full narrative report: Executive Summary, Signal Analysis, Opportunity Map
+- `signal_analysis.json` — fetch metadata, keyword hits, data quality, per-source status (`live | cached | failed`)
+- `leads.csv` — company-level leads with job count, top keywords, and readiness score
+- `eval_report.md` — quality-gate results written by `marketscout eval`
+
+**Why trust it:**
+
+- Every `evidence.link` in the output exists in `input_signals.json` — `eval` exits 1 if any link is absent (no hallucinated sources)
+- `--deterministic` seeds random at 42 and sorts all signals by title — two runs on the same data produce bit-identical outputs
+- Cache fallback is automatic and transparent: `signal_analysis.json` records `live | cached | failed` per source
+- 86 tests cover schema validation, evidence integrity, deterministic mode, fetch status, and CLI artifact creation
 
 ---
 
@@ -16,25 +29,22 @@ MarketScout pulls real headlines (Google News RSS) and job listings (Adzuna or R
 
 ```bash
 # 1. Generate the opportunity map
-python -m marketscout run --city Vancouver --industry Construction --deterministic
+marketscout run --city Vancouver --industry Construction --deterministic
 
 # 2. Verify quality (schema, evidence links, no hallucination)
-python -m marketscout eval \
+marketscout eval \
   --signals out/vancouver_construction_<date>/input_signals.json \
   --strategy out/vancouver_construction_<date>/strategy.json
 
 # 3. Pack everything into a shareable zip
-python -m marketscout bundle --out-dir out/vancouver_construction_<date>
+marketscout bundle --out-dir out/vancouver_construction_<date>
 ```
 
-![Terminal output showing Fetch Status, Data Quality and Top 5 Opportunities tables](assets/terminal.png)
-*Replace with an actual screenshot: `python -m marketscout run --city Vancouver --industry Construction`*
+![Terminal output — Fetch Status, Data Quality, Top 5 Opportunities](assets/terminal.png)
 
-![report.html open in browser — Executive Summary and Opportunity Map](assets/report.png)
-*Replace with an actual screenshot of `out/.../report.html` in a browser*
+![report.html — Executive Summary and Opportunity Map](assets/report.png)
 
 ![eval_report.md — all checks passing](assets/eval.png)
-*Replace with an actual screenshot of `marketscout eval` output*
 
 ---
 
@@ -46,7 +56,7 @@ python -m venv .venv
 source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
 
-python -m marketscout run --city Vancouver --industry Construction
+marketscout run --city Vancouver --industry Construction
 ```
 
 Outputs land in `out/<city>_<industry>_<date>/`.
@@ -69,13 +79,12 @@ Outputs land in `out/<city>_<industry>_<date>/`.
 | `strategy.json` | v2.0: city, industry, opportunity_map (5–8 items + score_breakdown), signals_used, data_quality |
 | `signal_analysis.json` | Fetch status, run metadata, keyword_hits, derived_tags |
 | `report.md` | Full Markdown report: Executive Summary, Signal Analysis, Opportunity Map, score breakdown, sources |
-| `report.html` | Same structure as Markdown in a minimal HTML report |
+| `report.html` | Same structure as Markdown in a self-contained HTML file |
 | `summary.txt` | Terminal-friendly summary (data quality + top opportunities) |
 | `leads.csv` | Company-level leads: company, job_count, top_keywords, readiness_score |
 | `eval_report.md` | Quality-gate results (written by `eval`) |
 
-![leads.csv open in a spreadsheet view](assets/leads.png)
-*Replace with an actual screenshot of `out/.../leads.csv`*
+![leads.csv in a spreadsheet view](assets/leads.png)
 
 ---
 
@@ -83,65 +92,29 @@ Outputs land in `out/<city>_<industry>_<date>/`.
 
 Capture these before publishing or sharing:
 
-- [ ] `assets/terminal.png` — `python -m marketscout run --city Vancouver --industry Construction`: Fetch Status + Data Quality + Top 5 Opportunities.
-- [ ] `assets/report.png` — open `out/.../report.html` in a browser: Executive Summary + Signal Analysis + Opportunity Map.
-- [ ] `assets/eval.png` — `python -m marketscout eval ...` output or `eval_report.md` showing all checks passing.
-- [ ] `assets/leads.png` — `out/.../leads.csv` top rows in a spreadsheet or editor.
-
----
-
-## Eval: trust gate
-
-```bash
-python -m marketscout eval \
-  --signals out/vancouver_construction_<date>/input_signals.json \
-  --strategy out/vancouver_construction_<date>/strategy.json
-```
-
-Writes `eval_report.md` next to the strategy file. Exit code **0** if all pass, **1** otherwise.
-
-Checks:
-
-- Strategy validates v2.0 schema
-- `opportunity_map` length in [5, 8]
-- Each opportunity: confidence in [0, 1], scores in [0, 10]
-- Each opportunity has ≥ 2 evidence items
-- Every `evidence.link` is present in `input_signals.json` (no hallucinated sources)
-- `data_quality.coverage_score` in [0, 1]
-- Each `score_breakdown` (when present) sums to 1.0
-
----
-
-## Bundle: share a run
-
-```bash
-# Auto-discovers latest run under out/
-python -m marketscout bundle
-
-# Specific run directory
-python -m marketscout bundle --out-dir out/vancouver_construction_<date>
-```
-
-Validates required files, copies artifacts into `bundle/`, and writes `marketscout_<city>_<industry>_<date>.zip` inside the run directory. Prints the zip path.
+- [ ] `assets/terminal.png` — `marketscout run --city Vancouver --industry Construction`: Fetch Status + Data Quality + Top 5 Opportunities
+- [ ] `assets/report.png` — open `out/.../report.html` in a browser: Executive Summary + Signal Analysis + Opportunity Map
+- [ ] `assets/eval.png` — `marketscout eval ...` output or `eval_report.md` showing all checks passing
+- [ ] `assets/leads.png` *(optional)* — `out/.../leads.csv` top rows in a spreadsheet or editor
 
 ---
 
 ## Interview talking points
 
-**Why CLI?**
-Minimal surface area. No server, no database, no UI framework to maintain. The interface is three commands; everything else is a file. Easy to test, easy to automate, easy to demonstrate in a terminal recording.
+**Two inputs → opportunity map**
+Just `--city` and `--industry`. No config files, no templates to fill in. The engine maps fetched signals through industry keyword templates to produce 5–8 ranked opportunities — each with problem statement, evidence, and estimated business case.
 
-**Why the eval gate? (no hallucinated links)**
-LLM outputs and even heuristic engines can reference sources that were never in the input. `eval` cross-checks every `evidence.link` against `input_signals.json` before accepting a run. Exit code 1 fails CI — you can't accidentally ship an unverified report.
+**Proof metrics + score_breakdown**
+Every opportunity carries `score_breakdown: {signal_frequency, source_diversity, job_role_density}` summing to 1.0. These weights drive the final `pain_score` and `roi_signal` — the ranking is decomposable, not a black box. The `eval` gate verifies the sum constraint.
 
-**Why deterministic mode?**
-Reproducibility is a trust signal. `--deterministic` seeds `random` at 42, sorts input signals by title before processing, and uses stable opportunity ordering. Two runs on the same inputs produce bit-identical `strategy.json` — auditable and comparable.
+**Deterministic mode**
+`--deterministic` seeds `random` at 42, sorts all input signals by title before processing, and uses stable opportunity ordering. Two runs on the same inputs produce bit-identical `strategy.json` — auditable and directly comparable.
 
-**Why score_breakdown?**
-Each opportunity carries `{signal_frequency, source_diversity, job_role_density}` that sum to 1.0. These weights drive the final `pain_score` rather than being decorative — the score is explainable and the `eval` gate verifies the constraint. Interviewers can ask "why is this ranked first?" and get a decomposable answer.
+**Eval gate: no hallucinated sources**
+Every `evidence.link` in `strategy.json` must exist in `input_signals.json`. `eval` cross-checks this and exits 1 if any link is absent. You cannot ship an unverified report — the gate is machine-enforced and CI-friendly.
 
-**Caching resilience**
-If a live fetch fails, the CLI falls back to the disk cache (`.cache/marketscout/`, configurable TTL). `signal_analysis.json` records `fetch_status` per source (`live | cached | failed`) and `run_metadata` (timestamp, duration, `cache_used`), so every run is fully auditable even under degraded network conditions.
+**Cache fallback resilience**
+If a live fetch fails, the CLI falls back to the disk cache (`.cache/marketscout/`, configurable TTL). `signal_analysis.json` records `fetch_status` per source (`live | cached | failed`) and `run_metadata` (timestamp, duration, `cache_used`), so every run is auditable even under degraded network conditions.
 
 ---
 
@@ -150,8 +123,8 @@ If a live fetch fails, the CLI falls back to the disk cache (`.cache/marketscout
 | Command | Description |
 |---------|-------------|
 | `run` | **Primary.** Fetch signals, generate v2.0 strategy, write all artifacts. |
-| `eval` | Quality gate: validate v2.0 strategy and evidence links; write eval_report.md. |
-| `bundle` | Copy artifacts into `bundle/` and create a zip; default is latest run under `out/`. |
+| `eval` | Quality gate: validate schema, evidence links, and scores; write `eval_report.md`. Exit 0 if all pass, 1 otherwise. |
+| `bundle` | Validate artifacts, copy to `bundle/`, create zip. Defaults to latest run under `out/`. |
 
 ### `run` options
 
@@ -163,10 +136,10 @@ If a live fetch fails, the CLI falls back to the disk cache (`.cache/marketscout
 | `--jobs-provider` | `adzuna` | Jobs provider: `adzuna` or `rss` |
 | `--jobs-limit` | `10` | Max jobs to fetch |
 | `--headlines-limit` | `10` | Max headlines to fetch |
-| `--refresh` | off | Force re-fetch (ignore cache) |
-| `--deterministic` | off | Seed 42, stable signal and opportunity ordering |
+| `--refresh` | off | Require fresh live fetch — exits 1 if network is unavailable |
+| `--deterministic` | off | Seed 42, stable signal + opportunity ordering |
 | `--allow-provider-fallback` | off | Fall back to RSS if primary provider fails |
-| `--no-write-leads` | off | Skip leads.csv export |
+| `--no-write-leads` | off | Skip `leads.csv` export |
 
 ---
 
@@ -177,18 +150,18 @@ If a live fetch fails, the CLI falls back to the disk cache (`.cache/marketscout
 | `MARKETSCOUT_CACHE_DIR` | `.cache/marketscout/` | Disk cache location |
 | `MARKETSCOUT_DISK_CACHE_TTL` | `3600` | Cache TTL in seconds |
 | `ADZUNA_APP_ID` | — | Adzuna API App ID |
-| `ADZUNA_API_KEY` | — | Adzuna API key |
+| `ADZUNA_APP_KEY` | — | Adzuna API key |
 | `OPENAI_API_KEY` | — | Optional: enables LLM-based strategy generation |
 
 ---
 
 ## Architecture
 
-- **Scout** — Fetches headlines (Google News RSS) and jobs (Adzuna or RSS). Retries with backoff; falls back to disk cache on failure. Records fetch status per source.
-- **Brain** — Industry templates map keywords → bottleneck tags → opportunity titles. Scores `pain_score`, `automation_potential`, `roi_signal`, `confidence` from signal frequency, source diversity, and job role density. Produces `score_breakdown` weights that sum to 1.0.
+- **Scout** — Fetches headlines (Google News RSS) and jobs (Adzuna or RSS). Falls back to disk cache on failure. Records `fetch_status` per source.
+- **Brain** — Industry templates map keywords → bottleneck tags → opportunity titles. Scores `pain_score`, `automation_potential`, `roi_signal`, `confidence` from signal frequency, source diversity, and job role density. Produces `score_breakdown` weights summing to 1.0.
 - **Reports** — Markdown and HTML generators consume `strategy.json` + `signal_analysis.json` and emit: Executive Summary, Fetch Status, Signal Analysis, Opportunity Map (with score breakdown), Leads summary, Sources.
 
-Flow: `run` → fetch signals (record status) → build signal analysis → generate v2.0 strategy → write artifacts → print Rich tables.
+Flow: `run` → fetch signals → build signal analysis → generate v2.0 strategy → write artifacts → print Rich tables.
 
 ---
 
@@ -201,7 +174,7 @@ make test
 PYTHONPATH=src pytest tests/ -v
 ```
 
-86 tests covering schema validation, deterministic mode, evidence link integrity, fetch status (live/cached/failed), CLI artifact creation, eval pass/fail cases, bundle creation, cache TTL, and provider parsing.
+86 tests covering schema validation, deterministic mode, evidence link integrity, fetch status (live/cached/failed), CLI artifact creation, eval pass/fail, bundle creation, cache TTL, and provider parsing.
 
 ---
 
