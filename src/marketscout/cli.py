@@ -9,6 +9,7 @@ import re
 import shutil
 import sys
 import time
+import uuid
 import zipfile
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -207,7 +208,9 @@ def _run_pipeline(
         entry.get("status") == "cached"
         for entry in fetch_status.values()
     )
+    run_id = str(uuid.uuid4())
     run_metadata = {
+        "run_id": run_id,
         "started_at_iso": started_at.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "duration_ms": duration_ms,
         "deterministic": deterministic,
@@ -261,13 +264,38 @@ def _run_pipeline(
         )
     summary_path.write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
 
+    lead_rows: list[dict] | None = None
     if write_leads:
         leads = build_leads(jobs)
+        lead_rows = [asdict(lead) for lead in leads]
         with leads_path.open("w", encoding="utf-8", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=["company", "job_count", "top_keywords", "readiness_score", "example_links"])
             writer.writeheader()
-            for lead in leads:
-                writer.writerow(asdict(lead))
+            for row in lead_rows:
+                writer.writerow(row)
+
+    # Persist run to SQLite (non-fatal — DB failures never break artifact generation)
+    try:
+        from marketscout.db import get_connection, save_run
+        _db_conn = get_connection()
+        try:
+            save_run(
+                conn=_db_conn,
+                run_id=run_id,
+                city=city,
+                industry=industry,
+                strategy=strategy,
+                headlines=headlines,
+                jobs=jobs,
+                fetch_status=fetch_status,
+                run_metadata=run_metadata,
+                strategy_mode=get_strategy_mode(),
+                leads=lead_rows,
+            )
+        finally:
+            _db_conn.close()
+    except Exception:
+        pass  # DB errors are silently swallowed so artifacts are always delivered
 
     # Rich terminal output
     console.print(f"\n[bold]MarketScout v{__version__}[/bold]\n")
@@ -527,6 +555,120 @@ def _write_eval_report(out_path: Path, results: list[tuple[str, bool, str]], str
     out_path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def cmd_history(limit: int = 10) -> int:
+    """Print recent runs as a Rich table. Returns 0 on success, 1 on error."""
+    try:
+        from rich.console import Console
+        from rich.table import Table
+    except ImportError:
+        print(f"MarketScout {__version__} requires 'rich'. Install with: pip install rich", file=sys.stderr)
+        return 1
+
+    try:
+        from marketscout.db import get_connection, list_runs
+        conn = get_connection()
+        rows = list_runs(conn, limit=limit)
+        conn.close()
+    except Exception as e:
+        print(f"Error: could not read run history: {e}", file=sys.stderr)
+        return 1
+
+    console = Console()
+    if not rows:
+        console.print("[yellow]No runs found in database.[/yellow]")
+        return 0
+
+    table = Table(title=f"Run history (last {limit})")
+    table.add_column("Run ID", style="dim", max_width=12)
+    table.add_column("Created at")
+    table.add_column("City", style="cyan")
+    table.add_column("Industry", style="cyan")
+    table.add_column("Mode")
+    table.add_column("Headlines", justify="right")
+    table.add_column("Jobs", justify="right")
+    table.add_column("Coverage", justify="right")
+
+    for r in rows:
+        run_id_short = (r["run_id"] or "")[:8]
+        table.add_row(
+            run_id_short,
+            r["created_at"] or "",
+            r["city"] or "",
+            r["industry"] or "",
+            r["strategy_mode"] or "",
+            str(r["headlines_count"] or 0),
+            str(r["jobs_count"] or 0),
+            f"{r['coverage_score']:.2f}" if r["coverage_score"] is not None else "",
+        )
+
+    console.print(table)
+    return 0
+
+
+def cmd_compare(city: str, industry: str, limit_runs: int = 3) -> int:
+    """
+    Compare the last N runs for a city + industry, aggregating opportunity scores.
+    Returns 0 on success, 1 on error.
+    """
+    try:
+        from rich.console import Console
+        from rich.table import Table
+    except ImportError:
+        print(f"MarketScout {__version__} requires 'rich'. Install with: pip install rich", file=sys.stderr)
+        return 1
+
+    try:
+        from marketscout.db import compare_runs, get_connection
+        conn = get_connection()
+        run_rows, opp_rows = compare_runs(conn, city=city, industry=industry, limit_runs=limit_runs)
+        conn.close()
+    except Exception as e:
+        print(f"Error: could not read comparison data: {e}", file=sys.stderr)
+        return 1
+
+    console = Console()
+
+    if not run_rows:
+        console.print(f"[yellow]No runs found for city='{city}', industry='{industry}'.[/yellow]")
+        return 0
+
+    run_table = Table(title=f"Recent runs — {city} / {industry}")
+    run_table.add_column("Run ID", style="dim", max_width=12)
+    run_table.add_column("Created at")
+    run_table.add_column("Mode")
+    run_table.add_column("Headlines", justify="right")
+    run_table.add_column("Jobs", justify="right")
+    for r in run_rows:
+        run_table.add_row(
+            (r["run_id"] or "")[:8],
+            r["created_at"] or "",
+            r["strategy_mode"] or "",
+            str(r["headlines_count"] or 0),
+            str(r["jobs_count"] or 0),
+        )
+    console.print(run_table)
+    console.print()
+
+    if opp_rows:
+        opp_table = Table(title="Aggregated opportunities (across runs)")
+        opp_table.add_column("Title", style="cyan", max_width=45)
+        opp_table.add_column("Avg pain", justify="right")
+        opp_table.add_column("Avg ROI", justify="right")
+        opp_table.add_column("Avg conf.", justify="right")
+        opp_table.add_column("Appearances", justify="right")
+        for o in opp_rows:
+            opp_table.add_row(
+                (o["title"] or "")[:45],
+                f"{o['avg_pain']:.2f}" if o["avg_pain"] is not None else "",
+                f"{o['avg_roi']:.2f}" if o["avg_roi"] is not None else "",
+                f"{o['avg_confidence']:.2f}" if o["avg_confidence"] is not None else "",
+                str(o["appearances"] or 0),
+            )
+        console.print(opp_table)
+
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="marketscout",
@@ -701,6 +843,55 @@ def main() -> int:
         help="Where to write eval_report.md (default: next to strategy.json).",
     )
     p_eval.set_defaults(func=lambda ns: cmd_eval(ns.signals, ns.strategy, ns.out))
+
+    # ── history ───────────────────────────────────────────────────────────────
+    p_history = subparsers.add_parser(
+        "history",
+        help="Show recent runs stored in the SQLite database.",
+        description="Print a table of the most recent MarketScout runs from the local database.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_history.add_argument(
+        "--limit",
+        type=int,
+        default=10,
+        metavar="N",
+        help="Number of recent runs to show (default: 10).",
+    )
+    p_history.set_defaults(func=lambda ns: cmd_history(ns.limit))
+
+    # ── compare ───────────────────────────────────────────────────────────────
+    p_compare = subparsers.add_parser(
+        "compare",
+        help="Compare the last N runs for a city + industry, aggregating opportunity scores.",
+        description=(
+            "Show the most recent runs for a city/industry pair and aggregate\n"
+            "opportunity scores across them to surface consistently high-scoring opportunities."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p_compare.add_argument(
+        "--city",
+        type=str,
+        required=True,
+        metavar="CITY",
+        help="Target city to compare runs for.",
+    )
+    p_compare.add_argument(
+        "--industry",
+        type=str,
+        required=True,
+        metavar="INDUSTRY",
+        help="Target industry to compare runs for.",
+    )
+    p_compare.add_argument(
+        "--limit-runs",
+        type=int,
+        default=3,
+        metavar="N",
+        help="Number of most recent runs to aggregate (default: 3).",
+    )
+    p_compare.set_defaults(func=lambda ns: cmd_compare(ns.city, ns.industry, ns.limit_runs))
 
     args = parser.parse_args()
     return args.func(args)

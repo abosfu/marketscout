@@ -127,6 +127,45 @@ Each run writes artifacts to `out/<city>_<industry>_<date>/`.
 
 ---
 
+## Run history and comparison
+
+Every `marketscout run` automatically persists a record to a local SQLite database (no external dependencies — uses Python's stdlib `sqlite3`).
+
+**Default location:** `.cache/marketscout/marketscout.db`
+**Override:** set `MARKETSCOUT_DB_PATH=/path/to/custom.db`
+
+**View recent runs:**
+
+```bash
+PYTHONPATH=src python3 -m marketscout history
+PYTHONPATH=src python3 -m marketscout history --limit 20
+```
+
+**Compare runs for a city + industry:**
+
+```bash
+PYTHONPATH=src python3 -m marketscout compare \
+  --city Vancouver --industry Construction
+
+PYTHONPATH=src python3 -m marketscout compare \
+  --city Toronto --industry Retail --limit-runs 5
+```
+
+`compare` shows each run's metadata alongside an aggregated opportunity table: average `pain_score`, `roi_signal`, `confidence`, and how many runs each opportunity appeared in — useful for spotting consistently high-signal opportunities across multiple fetches.
+
+> DB failures are silently swallowed — if the database is unavailable, artifact generation always completes normally.
+
+**Database schema (4 tables):**
+
+| Table | Key columns |
+|-------|-------------|
+| `runs` | `run_id`, `city`, `industry`, `strategy_mode`, `coverage_score`, `headlines_count`, `jobs_count` |
+| `opportunities` | `run_id` FK, `title`, `pain_score`, `roi_signal`, `confidence`, `ai_category` |
+| `signals` | `run_id` FK, `source_type` (headline/job), `provider`, `title`, `link`, `company` |
+| `leads` | `run_id` FK, `company`, `job_count`, `readiness_score` |
+
+---
+
 ## Eval and bundle
 
 **Find the latest run directory:**
@@ -227,9 +266,25 @@ Three cities and industries chosen to show the engine working across different s
 
 | Command | Description |
 |---------|-------------|
-| `run` | **Primary.** Fetch signals, generate v2.0 strategy, write all artifacts. |
+| `run` | **Primary.** Fetch signals, generate v2.0 strategy, write all artifacts. Persists run to SQLite. |
 | `eval` | Quality gate: validate schema, evidence links, and scores; write `eval_report.md`. Exit 0 if all pass, 1 otherwise. |
 | `bundle` | Validate artifacts, copy to `bundle/`, create zip. Defaults to latest run under `out/`. |
+| `history` | Show recent runs from the local SQLite database. |
+| `compare` | Aggregate and compare opportunity scores across recent runs for a city + industry. |
+
+### `history` options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--limit` | `10` | Number of recent runs to display |
+
+### `compare` options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--city` | *(required)* | City to compare runs for |
+| `--industry` | *(required)* | Industry to compare runs for |
+| `--limit-runs` | `3` | Number of most recent runs to aggregate |
 
 ### `run` options
 
@@ -257,6 +312,7 @@ Three cities and industries chosen to show the engine working across different s
 | `ADZUNA_COUNTRY` | `ca` | Adzuna country code |
 | `MARKETSCOUT_CACHE_DIR` | `.cache/marketscout/` | Disk cache location |
 | `MARKETSCOUT_DISK_CACHE_TTL` | `3600` | Cache TTL in seconds |
+| `MARKETSCOUT_DB_PATH` | `.cache/marketscout/marketscout.db` | SQLite database file path |
 | `OPENAI_API_KEY` | — | Optional: enables LLM-based strategy generation |
 
 ---
@@ -284,7 +340,8 @@ marketscout/
 │   ├── 2.png                        # Vancouver Real Estate demo screenshot
 │   └── 3.png                        # Toronto Retail demo screenshot
 ├── src/marketscout/
-│   ├── cli.py                       # run | eval | bundle — single entry point
+│   ├── cli.py                       # run | eval | bundle | history | compare
+│   ├── db.py                        # SQLite persistence (stdlib sqlite3 only)
 │   ├── normalize.py                 # city + industry normalization and validation
 │   ├── config.py                    # env-var overrides (cache TTL, strategy mode, etc.)
 │   ├── cache.py                     # disk cache read/write with TTL
@@ -301,6 +358,7 @@ marketscout/
     ├── fixtures/                    # sample data for tests only (never loaded at runtime)
     ├── conftest.py
     ├── test_cli.py                  # run, eval, bundle, fetch status, run metadata
+    ├── test_db.py                   # SQLite persistence: init, save, list, compare, history/compare CLI
     ├── test_strategy.py             # scoring, deterministic, evidence integrity, reports, leads
     ├── test_normalize.py            # city/industry normalization, template lookup, CLI validation
     ├── test_scout.py                # headlines, jobs, Adzuna provider
