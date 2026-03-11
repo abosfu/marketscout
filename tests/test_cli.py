@@ -68,6 +68,8 @@ def _minimal_v2_strategy(
     industry: str = "Construction",
     n_opp: int = 5,
     evidence_per_opp: int = 2,
+    headlines_count: int = 2,
+    jobs_count: int = 2,
 ) -> dict:
     opp: dict = {
         "title": "Opportunity",
@@ -91,7 +93,12 @@ def _minimal_v2_strategy(
         "city": city,
         "industry": industry,
         "opportunity_map": [dict(opp) for _ in range(n_opp)],
-        "signals_used": {"headlines_count": 2, "jobs_count": 1, "news_sources_count": 1, "job_companies_count": 1},
+        "signals_used": {
+            "headlines_count": headlines_count,
+            "jobs_count": jobs_count,
+            "news_sources_count": 1,
+            "job_companies_count": 1,
+        },
         "data_quality": {"freshness_window_days": 1, "coverage_score": 0.7, "source_mix_score": 0.6},
     }
 
@@ -133,7 +140,7 @@ def test_run_creates_all_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     sa = json.loads((out_dir / "signal_analysis.json").read_text())
     assert sa["city"] == "Vancouver" and sa["industry"] == "Construction"
     assert "signals" in sa and "headlines_count" in sa["signals"]
-    assert "keyword_hits" in sa and "derived_tags" in sa
+    assert "keyword_hits" in sa and "top_tags" in sa
 
     assert "Opportunity Map" in (out_dir / "report.md").read_text()
     assert "Executive Summary" in (out_dir / "report.md").read_text()

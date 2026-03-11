@@ -158,7 +158,7 @@ def _run_pipeline(
 
     from marketscout.brain import generate_strategy, strategy_to_html, strategy_to_markdown
     from marketscout.brain.strategy import build_signal_analysis
-    from marketscout.config import get_cache_dir, get_disk_cache_ttl_seconds
+    from marketscout.config import get_cache_dir, get_disk_cache_ttl_seconds, get_strategy_mode
     from marketscout.leads import build_leads
 
     try:
@@ -232,6 +232,7 @@ def _run_pipeline(
         headlines, jobs, city, industry,
         run_metadata=run_metadata,
         fetch_status=fetch_status,
+        strategy_mode=get_strategy_mode(),
     )
     signal_analysis_path.write_text(json.dumps(signal_analysis, indent=2), encoding="utf-8")
 
@@ -442,7 +443,7 @@ def cmd_eval(signals_path: Path, strategy_path: Path, out_path: Path | None) -> 
         link = (j.get("link") or "").strip()
         if link:
             allowed_links.add(link)
-    allowed_links.add("#")
+    # Note: "#" is NOT added unconditionally — it is only valid if a signal itself has "#" as its link.
 
     try:
         strategy_raw = json.loads(strategy_path.read_text(encoding="utf-8"))
@@ -464,6 +465,20 @@ def cmd_eval(signals_path: Path, strategy_path: Path, out_path: Path | None) -> 
         for o in strategy.opportunity_map
     )
     results.append(("scores_bounds", scores_ok, "Each opportunity: confidence in [0,1], pain/automation/roi in [0,10]"))
+
+    # signals_used counts must match what is actually present in input_signals.json
+    expected_h = len(headlines)
+    expected_j = len(jobs)
+    actual_h = strategy.signals_used.headlines_count
+    actual_j = strategy.signals_used.jobs_count
+    signals_count_ok = (actual_h == expected_h) and (actual_j == expected_j)
+    results.append((
+        "signals_used_counts",
+        signals_count_ok,
+        f"signals_used counts match input_signals.json "
+        f"(headlines: expected {expected_h}, got {actual_h}; "
+        f"jobs: expected {expected_j}, got {actual_j})",
+    ))
 
     evidence_count_ok = all(len(o.evidence) >= 2 for o in strategy.opportunity_map)
     results.append(("evidence_count", evidence_count_ok, "Each opportunity has >= 2 evidence items"))

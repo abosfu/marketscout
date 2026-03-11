@@ -35,6 +35,13 @@ HIGH_AUTOMATION_KEYWORDS = ("labor", "shortage", "admin", "data entry", "schedul
 # Lower automation (strategy, partnership, regulatory)
 LOW_AUTOMATION_KEYWORDS = ("partnership", "strategy", "regulatory", "permit", "zoning", "compliance")
 
+# Fixed scoring weights for pain_score (transparent, reproducible).
+# pain_score = 2.0 + 8.0 * (W_FREQ*raw_freq + W_DIV*raw_div_norm + W_JOB*raw_job)
+# where each component is normalised to [0, 1]; max weighted = 1.0, max pain_score = 10.0.
+_W_FREQ: float = 0.5   # weight for evidence frequency (raw_freq in [0,1])
+_W_DIV: float = 0.3    # weight for source diversity (raw_div_norm in [0,1])
+_W_JOB: float = 0.2    # weight for job-role density (raw_job in [0,1])
+
 
 def _parse_timestamp(ts: str) -> datetime | None:
     """Parse a timestamp string from RSS or ISO-8601 into a datetime, or return None."""
@@ -150,11 +157,12 @@ def build_signal_analysis(
     *,
     run_metadata: dict[str, Any] | None = None,
     fetch_status: dict[str, Any] | None = None,
+    strategy_mode: str | None = None,
 ) -> dict[str, Any]:
     """
     Build signal_analysis.json payload.
-    Includes: city, industry, signals counts, keyword_hits, derived_tags.
-    Optionally includes run_metadata and fetch_status when provided.
+    Includes: city, industry, signals counts, keyword_hits, top_tags.
+    Optionally includes run_metadata, fetch_status, and strategy_mode_config when provided.
     """
     if template is None:
         template = get_template(industry)
@@ -181,7 +189,6 @@ def build_signal_analysis(
         if (j.get("company") or "").strip()
     }
     keyword_hits: dict[str, int] = {}
-    derived_tags: dict[str, int] = {}
     for kw, tag in keyword_to_bottleneck.items():
         count = 0
         for h in headlines:
@@ -192,7 +199,9 @@ def build_signal_analysis(
                 count += 1
         if count > 0:
             keyword_hits[tag] = keyword_hits.get(tag, 0) + count
-            derived_tags[tag] = derived_tags.get(tag, 0) + count
+
+    # top_tags: bottleneck labels ranked by total keyword hit count (replaces duplicate derived_tags)
+    top_tags = sorted(keyword_hits.keys(), key=lambda t: -keyword_hits[t])
 
     result: dict[str, Any] = {
         "city": city,
@@ -204,8 +213,10 @@ def build_signal_analysis(
             "unique_companies": len(unique_companies),
         },
         "keyword_hits": keyword_hits,
-        "derived_tags": derived_tags,
+        "top_tags": top_tags,
     }
+    if strategy_mode is not None:
+        result["strategy_mode_config"] = strategy_mode
     if run_metadata is not None:
         result["run_metadata"] = run_metadata
     if fetch_status is not None:
@@ -246,6 +257,12 @@ def _build_opportunity_map(
     Build 5-8 opportunities from headlines + jobs using template keyword_map.
     Evidence only from provided headlines/jobs. Sorted by (pain_score + roi_signal)/2, then confidence.
     When deterministic=True, use stable ordering for keywords and sort opportunities deterministically.
+
+    Pain score uses a transparent linear formula:
+        pain_score = 2.0 + 8.0 * (_W_FREQ*raw_freq + _W_DIV*raw_div_norm + _W_JOB*raw_job)
+    where raw_div is normalised to [0,1] (raw_div * 2), so max weighted = 1.0 and max pain = 10.0.
+    score_breakdown shows the proportional contribution of each weighted component.
+    roi_signal and automation_potential are computed per-opportunity from that opportunity's evidence.
     """
     keyword_to_bottleneck = template.keyword_to_bottleneck() if template else {}
     if not keyword_to_bottleneck:
@@ -260,6 +277,11 @@ def _build_opportunity_map(
             "material": "Material cost and availability",
         }
     kw_items = sorted(keyword_to_bottleneck.items()) if deterministic else list(keyword_to_bottleneck.items())
+
+    # Reverse map: bottleneck label → set of keywords (used to filter signals during padding)
+    bottleneck_to_keywords: dict[str, set[str]] = {}
+    for kw, bn in keyword_to_bottleneck.items():
+        bottleneck_to_keywords.setdefault(bn, set()).add(kw)
 
     # Collect (bottleneck, evidence_list) from headlines and jobs
     bucket: dict[str, list[EvidenceItem]] = {}
@@ -298,11 +320,8 @@ def _build_opportunity_map(
                     used_job_links.add(link)
                 break
 
-    # Build OpportunityItem for each bucket; ensure at least 1 evidence per opportunity
+    # Build OpportunityItem for each bucket with transparent per-opportunity scoring.
     opportunities: list[OpportunityItem] = []
-    all_evidence_titles = " ".join(
-        (h.get("title") or "") for h in headlines
-    ) + " " + " ".join((j.get("title") or "") for j in jobs)
     bucket_iter = sorted(bucket.items()) if deterministic else bucket.items()
     for problem, evidence_list in bucket_iter:
         if not evidence_list:
@@ -312,22 +331,37 @@ def _build_opportunity_map(
         has_job = any(e.source == "job" for e in evidence_list)
         n_evidence = len(evidence_list)
         n_job_evidence = sum(1 for e in evidence_list if e.source == "job")
+
+        # Raw score components (all normalised to [0, 1])
         raw_freq = min(1.0, n_evidence / 5.0)
         raw_div = 0.5 if (has_headline and has_job) else (0.25 if (has_headline or has_job) else 0.0)
+        raw_div_n = raw_div * 2.0          # normalise [0, 0.5] → [0, 1.0]
         raw_job = (n_job_evidence / n_evidence) if n_evidence else 0.0
-        total_raw = raw_freq + raw_div + raw_job
-        if total_raw <= 0:
-            sb = ScoreBreakdown(signal_frequency=1.0 / 3.0, source_diversity=1.0 / 3.0, job_role_density=1.0 / 3.0)
+
+        # Transparent linear pain_score; max weighted = 1.0 → max pain = 10.0
+        weighted = _W_FREQ * raw_freq + _W_DIV * raw_div_n + _W_JOB * raw_job
+        pain_score = min(10.0, round(2.0 + 8.0 * weighted, 1))
+
+        # score_breakdown: proportional contribution of each weighted component (sums to 1.0)
+        if weighted > 0.0:
+            sf = round((_W_FREQ * raw_freq) / weighted, 3)
+            sd = round((_W_DIV * raw_div_n) / weighted, 3)
+            jr = round(max(0.0, 1.0 - sf - sd), 3)
         else:
-            sb = ScoreBreakdown(
-                signal_frequency=round(raw_freq / total_raw, 3),
-                source_diversity=round(raw_div / total_raw, 3),
-                job_role_density=round(raw_job / total_raw, 3),
-            )
-        pain_score = 2.0 + 8.0 * (raw_freq * sb.signal_frequency + raw_div * sb.source_diversity + raw_job * sb.job_role_density)
-        pain_score = min(10.0, round(pain_score, 1))
-        automation = _automation_potential_from_tag(problem, all_evidence_titles)
-        roi_signal = _roi_signal_from_jobs(jobs, 1 if has_job else 0)
+            sf = round(1.0 / 3.0, 3)
+            sd = round(1.0 / 3.0, 3)
+            jr = round(max(0.0, 1.0 - sf - sd), 3)
+        sb = ScoreBreakdown(signal_frequency=sf, source_diversity=sd, job_role_density=jr)
+
+        # Per-opportunity roi_signal: use only job items that appear in this opportunity's evidence
+        job_ev_links = {e.link for e in evidence_list if e.source == "job"}
+        opp_jobs = [j for j in jobs if (j.get("link") or "#") in job_ev_links]
+        roi_signal = _roi_signal_from_jobs(opp_jobs if opp_jobs else (jobs if has_job else []), n_job_evidence)
+
+        # Per-opportunity automation_potential: use only this opportunity's evidence titles
+        opp_evidence_titles = " ".join(e.title for e in evidence_list)
+        automation = _automation_potential_from_tag(problem, opp_evidence_titles)
+
         confidence = _confidence_single(n_evidence, has_headline, has_job, data_quality.freshness_window_days)
         ai_cat = _bottleneck_to_ai_category(problem, template)
         title_short = problem[:50] + ("..." if len(problem) > 50 else "")
@@ -352,27 +386,46 @@ def _build_opportunity_map(
             )
         )
 
-    # Pad to 5-8 using template bottlenecks not yet covered
+    # Pad to 5 using template bottlenecks not yet covered.
+    # For each padded bottleneck, prefer signals whose titles contain a related keyword
+    # so evidence stays semantically connected to the problem.
+    # Prefer items with real (non-placeholder) links to keep evidence traceable.
     bottleneck_list = list(keyword_to_bottleneck.values()) or [f"Market dynamics in {city}"]
     all_sources: list[tuple[str, str, Literal["headline", "job"]]] = []
     for h in headlines[:8]:
         all_sources.append((h.get("title") or "Headline", h.get("link") or "#", "headline"))
     for j in jobs[:8]:
         all_sources.append((j.get("title") or "Job", j.get("link") or "#", "job"))
+    real_sources = [(t, lnk, src) for t, lnk, src in all_sources if lnk and lnk != "#"]
+
     used_problems = {o.problem for o in opportunities}
     idx = 0
     while len(opportunities) < 5 and idx < len(bottleneck_list) * 2:
         p = bottleneck_list[idx % len(bottleneck_list)]
         if p not in used_problems:
             used_problems.add(p)
-            ev = []
-            if all_sources:
-                for i in range(min(2, len(all_sources))):
-                    t, link, src = all_sources[(idx + i) % len(all_sources)]
-                    ev.append(EvidenceItem(title=t, link=link, source=src))
-            if not ev and all_sources:
-                t, link, src = all_sources[idx % len(all_sources)]
-                ev = [EvidenceItem(title=t, link=link, source=src)]
+            bn_keywords = bottleneck_to_keywords.get(p, set())
+            ev: list[EvidenceItem] = []
+            seen_ev_links: set[str] = set()
+            # First pass: prefer signals that contain a keyword for this bottleneck
+            pool = real_sources or all_sources
+            for t, lnk, src in pool:
+                if lnk in seen_ev_links:
+                    continue
+                if bn_keywords and any(kw in t.lower() for kw in bn_keywords):
+                    ev.append(EvidenceItem(title=t, link=lnk, source=src))
+                    seen_ev_links.add(lnk)
+                    if len(ev) >= 2:
+                        break
+            # Second pass: fill to 2 with any real signals (general market context)
+            if len(ev) < 2:
+                for t, lnk, src in pool:
+                    if lnk not in seen_ev_links:
+                        ev.append(EvidenceItem(title=t, link=lnk, source=src))
+                        seen_ev_links.add(lnk)
+                        if len(ev) >= 2:
+                            break
+            # Last resort: placeholder (only if no real sources exist at all)
             if not ev:
                 ev = [EvidenceItem(title=f"{industry} context", link="#", source="headline")]
             opportunities.append(
@@ -402,16 +455,21 @@ def _build_opportunity_map(
         if fp in used_problems:
             continue
         used_problems.add(fp)
-        ev = [EvidenceItem(title=f"{industry} context", link="#", source="headline")]
-        if all_sources:
-            n = min(2, len(all_sources))
-            ev = [EvidenceItem(title=all_sources[j % len(all_sources)][0], link=all_sources[j % len(all_sources)][1], source=all_sources[j % len(all_sources)][2]) for j in range(n)]
+        ev_fb: list[EvidenceItem] = []
+        seen_fb: set[str] = set()
+        pool = real_sources or all_sources
+        for t, lnk, src in pool[:2]:
+            if lnk not in seen_fb:
+                ev_fb.append(EvidenceItem(title=t, link=lnk, source=src))
+                seen_fb.add(lnk)
+        if not ev_fb:
+            ev_fb = [EvidenceItem(title=f"{industry} context", link="#", source="headline")]
         opportunities.append(
             OpportunityItem(
                 title=fp[:50],
                 problem=fp,
                 ai_category=_bottleneck_to_ai_category(fp, template),
-                evidence=ev,
+                evidence=ev_fb,
                 pain_score=2.5,
                 automation_potential=5.0,
                 roi_signal=3.0,

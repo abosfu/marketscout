@@ -82,11 +82,9 @@ def strategy_to_markdown(
             sections.append("**Keyword hits (tag → count):**\n")
             for tag, count in sorted(keyword_hits.items()):
                 sections.append(f"- {tag}: {count}\n")
-        derived = signal_analysis.get("derived_tags") or {}
-        if derived:
-            sections.append("**Derived tags:**\n")
-            for tag, count in sorted(derived.items()):
-                sections.append(f"- {tag}: {count}\n")
+        top_tags = signal_analysis.get("top_tags") or []
+        if top_tags:
+            sections.append("**Top bottleneck tags:** " + ", ".join(top_tags[:5]) + "\n")
         sections.append("")
 
     # Opportunity Map table (title, pain, ROI signal, confidence, category)
