@@ -50,6 +50,16 @@ class ScoreBreakdown(BaseModel):
         return self
 
 
+class OpportunityBrief(BaseModel):
+    """Actionable decision brief for a single opportunity."""
+
+    likely_buyer: str = Field(..., description="Persona or role most likely to feel this pain")
+    pain_theme: str = Field(..., description="Short label for the pain category")
+    commercial_angle: str = Field(..., description="Type of product or service that addresses this")
+    suggested_next_step: str = Field(..., description="Recommended action based on signal strength")
+    why_now: str = Field(..., description="Evidence-based urgency signal for this opportunity")
+
+
 class OpportunityItem(BaseModel):
     """One opportunity with proof metrics, business case, and explainable score breakdown."""
 
@@ -69,6 +79,10 @@ class OpportunityItem(BaseModel):
     score_breakdown: Optional[ScoreBreakdown] = Field(
         default=None,
         description="Explainable weights (signal_frequency, source_diversity, job_role_density) summing to 1.0",
+    )
+    brief: Optional[OpportunityBrief] = Field(
+        default=None,
+        description="Actionable decision brief: buyer, pain theme, commercial angle, next step, why now",
     )
 
 

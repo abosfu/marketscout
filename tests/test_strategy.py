@@ -16,12 +16,13 @@ from marketscout.brain.schema import (
     BusinessCase,
     DataQuality,
     EvidenceItem,
+    OpportunityBrief,
     OpportunityItem,
     SignalsUsed,
     StrategyOutput,
     get_json_schema,
 )
-from marketscout.brain.strategy import generate_mock_strategy, generate_strategy
+from marketscout.brain.strategy import _build_opportunity_brief, generate_mock_strategy, generate_strategy
 from marketscout.leads import LeadRow, build_leads
 
 
@@ -307,3 +308,125 @@ def test_leads_can_be_written_to_csv(tmp_path: Path) -> None:
     lines = csv_path.read_text(encoding="utf-8").strip().splitlines()
     assert lines[0].split(",") == fieldnames
     assert "SampleCo" in lines[1]
+
+
+# ── OpportunityBrief ───────────────────────────────────────────────────────────
+
+def _ev(source: str = "headline") -> EvidenceItem:
+    return EvidenceItem(title="Labor shortage hits construction", link="https://ex.com/1", source=source)
+
+
+def test_brief_fields_populated() -> None:
+    """_build_opportunity_brief returns an OpportunityBrief with all fields non-empty."""
+    brief = _build_opportunity_brief(
+        title="Labor shortages and wage pressure",
+        ai_category="Operational efficiency",
+        pain_score=7.0,
+        evidence=[_ev("headline"), _ev("job")],
+        industry="Construction",
+    )
+    assert isinstance(brief, OpportunityBrief)
+    assert brief.likely_buyer
+    assert brief.pain_theme
+    assert brief.commercial_angle
+    assert brief.suggested_next_step
+    assert brief.why_now
+
+
+def test_brief_next_step_high_pain() -> None:
+    brief = _build_opportunity_brief(
+        title="Manual dispatch bottleneck",
+        ai_category="Operational efficiency",
+        pain_score=8.5,
+        evidence=[_ev()],
+        industry="Construction",
+    )
+    assert "outreach" in brief.suggested_next_step.lower()
+
+
+def test_brief_next_step_low_pain() -> None:
+    brief = _build_opportunity_brief(
+        title="Low signal topic",
+        ai_category="Market entry",
+        pain_score=2.0,
+        evidence=[_ev()],
+        industry="Retail",
+    )
+    assert "watch" in brief.suggested_next_step.lower() or "monitor" in brief.suggested_next_step.lower()
+
+
+def test_brief_why_now_strong_evidence() -> None:
+    evidence = [
+        EvidenceItem(title=f"Signal {i}", link=f"https://ex.com/{i}", source="headline" if i % 2 == 0 else "job")
+        for i in range(4)
+    ]
+    brief = _build_opportunity_brief(
+        title="Test", ai_category="Cost reduction", pain_score=7.0,
+        evidence=evidence, industry="Manufacturing",
+    )
+    assert "4" in brief.why_now
+
+
+def test_brief_buyer_refined_from_job_title() -> None:
+    manager_ev = EvidenceItem(
+        title="Operations Manager — Construction",
+        link="https://ex.com/job1",
+        source="job",
+    )
+    brief = _build_opportunity_brief(
+        title="Labor shortage", ai_category="Operational efficiency",
+        pain_score=6.0, evidence=[manager_ev], industry="Construction",
+    )
+    assert "manager" in brief.likely_buyer.lower()
+
+
+def test_mock_strategy_opportunities_have_brief() -> None:
+    headlines = [
+        {"title": "Labor shortage hits construction sector", "link": "https://ex.com/h1", "published": ""},
+        {"title": "Wage pressure rising for skilled workers", "link": "https://ex.com/h2", "published": ""},
+    ]
+    jobs = [
+        {"title": "Construction Coordinator", "link": "https://ex.com/j1", "published": "", "company": "BuildCo"},
+    ]
+    strategy = generate_mock_strategy(headlines, "Construction", "Vancouver", jobs=jobs)
+    for opp in strategy.opportunity_map:
+        assert opp.brief is not None, f"Missing brief on: {opp.title}"
+        assert opp.brief.likely_buyer
+        assert opp.brief.pain_theme
+        assert opp.brief.commercial_angle
+        assert opp.brief.suggested_next_step
+        assert opp.brief.why_now
+
+
+def test_brief_serialises_in_to_json_dict() -> None:
+    """brief field round-trips through to_json_dict without losing data."""
+    strategy = generate_mock_strategy(
+        [{"title": "Labor shortage", "link": "https://ex.com/h", "published": ""}],
+        "Construction", "Vancouver",
+    )
+    d = strategy.to_json_dict()
+    for opp in d["opportunity_map"]:
+        assert "brief" in opp
+        if opp["brief"] is not None:
+            assert "likely_buyer" in opp["brief"]
+
+
+def test_markdown_report_includes_brief() -> None:
+    strategy = generate_mock_strategy(
+        [{"title": "Labor shortage in construction", "link": "https://ex.com/h1", "published": ""}],
+        "Construction", "Vancouver",
+    )
+    md = strategy_to_markdown(strategy)
+    assert "Likely buyer" in md
+    assert "Suggested next step" in md
+
+
+def test_html_report_includes_brief() -> None:
+    strategy = generate_mock_strategy(
+        [{"title": "Labor shortage in construction", "link": "https://ex.com/h1", "published": ""}],
+        "Construction", "Vancouver",
+    )
+    from marketscout.brain.report_html import strategy_to_html
+    html = strategy_to_html(strategy)
+    assert "Likely buyer" in html
+    assert "Why now" in html

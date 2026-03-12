@@ -14,6 +14,7 @@ from marketscout.brain.schema import (
     BusinessCase,
     DataQuality,
     EvidenceItem,
+    OpportunityBrief,
     OpportunityItem,
     ScoreBreakdown,
     SignalsUsed,
@@ -41,6 +42,103 @@ LOW_AUTOMATION_KEYWORDS = ("partnership", "strategy", "regulatory", "permit", "z
 _W_FREQ: float = 0.5   # weight for evidence frequency (raw_freq in [0,1])
 _W_DIV: float = 0.3    # weight for source diversity (raw_div_norm in [0,1])
 _W_JOB: float = 0.2    # weight for job-role density (raw_job in [0,1])
+
+# ── Opportunity brief ──────────────────────────────────────────────────────────
+
+# Default decision-maker persona per industry
+_BUYER_MAP: dict[str, str] = {
+    "Construction": "Operations Manager / Site Supervisor",
+    "Retail": "Store Ops Lead / Regional Manager",
+    "Healthcare": "Clinic Administrator / Operations Director",
+    "Technology": "VP Engineering / Product Lead",
+    "Real Estate": "Property Manager / Brokerage Principal",
+    "Manufacturing": "Plant Manager / Operations Director",
+    "Professional Services": "Managing Partner / Practice Lead",
+}
+
+# Commercial angle by AI category
+_COMMERCIAL_MAP: dict[str, str] = {
+    "Operational efficiency": "Workflow automation, scheduling software, or process integration",
+    "Cost reduction": "Cost-reduction consulting, outsourcing, or efficiency SaaS",
+    "Risk mitigation": "Compliance monitoring, risk assessment tooling, or managed services",
+    "Regulatory & permits": "Permitting workflow software, compliance tooling, or advisory services",
+    "Market entry": "Market intelligence, go-to-market advisory, or partner-search services",
+    "Growth and scale": "Capacity-building platforms, staffing tools, or strategic consulting",
+    "Partnership and M&A": "Deal sourcing, due-diligence tooling, or partnership advisory",
+}
+
+
+def _build_opportunity_brief(
+    title: str,
+    ai_category: str,
+    pain_score: float,
+    evidence: list[EvidenceItem],
+    industry: str,
+) -> OpportunityBrief:
+    """
+    Derive a structured, deterministic decision brief from scoring and evidence.
+    No LLM required — all fields come from template mappings and evidence metadata.
+    """
+    # Likely buyer: start from industry default, then refine from job titles in evidence
+    buyer = _BUYER_MAP.get(industry, "Operations Manager / Decision-Maker")
+    for e in evidence:
+        if e.source != "job":
+            continue
+        jt = e.title.lower()
+        if "director" in jt or " vp " in jt or "vice president" in jt:
+            buyer = f"Director / VP — {industry}"
+            break
+        if "manager" in jt:
+            buyer = f"Operations Manager — {industry}"
+            break
+        if "coordinator" in jt or "scheduler" in jt or "dispatcher" in jt:
+            buyer = "Operations Coordinator (escalation path: Ops Manager)"
+            break
+
+    # pain_theme: the bottleneck label, cleaned up
+    pain_theme = title.rstrip(".")
+
+    # commercial_angle from ai_category lookup
+    commercial_angle = _COMMERCIAL_MAP.get(
+        ai_category,
+        "Software tools or consulting services addressing this bottleneck",
+    )
+
+    # suggested_next_step from pain severity
+    if pain_score >= 8.0:
+        next_step = (
+            "Initiate direct outreach — signal strength is high; "
+            "qualified buyers likely have active budget or mandate"
+        )
+    elif pain_score >= 6.0:
+        next_step = "Qualify 3–5 target companies from leads.csv; validate pain in discovery calls"
+    elif pain_score >= 4.0:
+        next_step = "Run a second data collection pass; monitor signal trend before committing resources"
+    else:
+        next_step = "Watch signal over next 2–3 runs; low confidence — validate before pursuing"
+
+    # why_now from evidence breadth
+    n_ev = len(evidence)
+    has_both = any(e.source == "headline" for e in evidence) and any(e.source == "job" for e in evidence)
+    if n_ev >= 4 and has_both:
+        why_now = (
+            f"{n_ev} independent signals across news and job postings indicate "
+            "the problem is active and broadly felt right now"
+        )
+    elif n_ev >= 3:
+        why_now = f"{n_ev} signals this cycle confirm the problem is present; cross-source coverage is partial"
+    elif n_ev >= 2:
+        why_now = "Signal present but narrow; confirm with additional run before treating as primary thesis"
+    else:
+        why_now = "Weak or single-source signal; use as early indicator only — not yet investable"
+
+    return OpportunityBrief(
+        likely_buyer=buyer,
+        pain_theme=pain_theme,
+        commercial_angle=commercial_angle,
+        suggested_next_step=next_step,
+        why_now=why_now,
+    )
 
 
 def _parse_timestamp(ts: str) -> datetime | None:
@@ -365,6 +463,13 @@ def _build_opportunity_map(
         confidence = _confidence_single(n_evidence, has_headline, has_job, data_quality.freshness_window_days)
         ai_cat = _bottleneck_to_ai_category(problem, template)
         title_short = problem[:50] + ("..." if len(problem) > 50 else "")
+        brief = _build_opportunity_brief(
+            title=title_short,
+            ai_category=ai_cat,
+            pain_score=pain_score,
+            evidence=evidence_list,
+            industry=industry,
+        )
         opportunities.append(
             OpportunityItem(
                 title=title_short,
@@ -383,6 +488,7 @@ def _build_opportunity_map(
                     ],
                 ),
                 score_breakdown=sb,
+                brief=brief,
             )
         )
 
@@ -428,11 +534,13 @@ def _build_opportunity_map(
             # Last resort: placeholder (only if no real sources exist at all)
             if not ev:
                 ev = [EvidenceItem(title=f"{industry} context", link="#", source="headline")]
+            pad_title = p[:50] + ("..." if len(p) > 50 else "")
+            pad_cat = _bottleneck_to_ai_category(p, template)
             opportunities.append(
                 OpportunityItem(
-                    title=p[:50] + ("..." if len(p) > 50 else ""),
+                    title=pad_title,
                     problem=p,
-                    ai_category=_bottleneck_to_ai_category(p, template),
+                    ai_category=pad_cat,
                     evidence=ev,
                     pain_score=3.0,
                     automation_potential=5.0,
@@ -443,6 +551,13 @@ def _build_opportunity_map(
                         assumptions=["Lower confidence; limited direct evidence"],
                     ),
                     score_breakdown=ScoreBreakdown(signal_frequency=1.0 / 3.0, source_diversity=1.0 / 3.0, job_role_density=1.0 / 3.0),
+                    brief=_build_opportunity_brief(
+                        title=pad_title,
+                        ai_category=pad_cat,
+                        pain_score=3.0,
+                        evidence=ev,
+                        industry=industry,
+                    ),
                 )
             )
         idx += 1
@@ -464,11 +579,12 @@ def _build_opportunity_map(
                 seen_fb.add(lnk)
         if not ev_fb:
             ev_fb = [EvidenceItem(title=f"{industry} context", link="#", source="headline")]
+        fb_cat = _bottleneck_to_ai_category(fp, template)
         opportunities.append(
             OpportunityItem(
                 title=fp[:50],
                 problem=fp,
-                ai_category=_bottleneck_to_ai_category(fp, template),
+                ai_category=fb_cat,
                 evidence=ev_fb,
                 pain_score=2.5,
                 automation_potential=5.0,
@@ -479,6 +595,13 @@ def _build_opportunity_map(
                     assumptions=["Limited direct evidence; industry template"],
                 ),
                 score_breakdown=ScoreBreakdown(signal_frequency=1.0 / 3.0, source_diversity=1.0 / 3.0, job_role_density=1.0 / 3.0),
+                brief=_build_opportunity_brief(
+                    title=fp[:50],
+                    ai_category=fb_cat,
+                    pain_score=2.5,
+                    evidence=ev_fb,
+                    industry=industry,
+                ),
             )
         )
 
