@@ -93,6 +93,72 @@ PYTHONPATH=src python3 -m marketscout run \
 
 ## Running the tool
 
+### Interactive mode (recommended for first use)
+
+Run with no arguments or the `menu` subcommand to enter the guided terminal menu:
+
+```bash
+PYTHONPATH=src python3 -m marketscout
+# or
+PYTHONPATH=src python3 -m marketscout menu
+```
+
+The menu looks like this:
+
+```
+MarketScout v1.2.0 — Interactive Mode
+
+  1. Run a new analysis
+  2. View run history
+  3. Compare runs
+  4. View opportunities
+  5. Update opportunity status
+  6. Setup API keys (session only)
+  7. Exit
+
+Choice:
+```
+
+Each option prompts for the required inputs and calls the existing backend. No arguments to remember. **The command-based CLI still works exactly as before** — interactive mode is an optional convenience layer on top.
+
+**Example flow:**
+
+```
+Choice: 1
+
+── Run New Analysis ──
+
+City [Vancouver]: Toronto
+Industry [Construction]: Retail
+Jobs provider [adzuna/rss]: rss
+Write leads.csv? [Y/n]: y
+Deterministic mode (reproducible output)? [y/N]: n
+
+  Running: Toronto / Retail …
+```
+
+**API key setup (option 6):**
+
+Keys are stored in `os.environ` for the current session only — nothing is written to disk:
+
+```
+Choice: 6
+
+── API Key Setup (session only — keys are not written to disk) ──
+
+  ADZUNA_APP_ID:  [not set]
+  ADZUNA_APP_KEY: [not set]
+  ADZUNA_COUNTRY: ca
+
+ADZUNA_APP_ID (leave blank to keep current): abc123
+ADZUNA_APP_KEY (leave blank to keep current): secret
+ADZUNA_COUNTRY [ca]:
+```
+
+**Missing key handling:** if you select the Adzuna provider but keys are absent, the menu offers three options: enter keys now, switch to RSS, or cancel — instead of failing silently.
+
+### Direct command mode
+
 ```bash
 # Vancouver — Construction
 PYTHONPATH=src python3 -m marketscout run \
@@ -266,11 +332,14 @@ Three cities and industries chosen to show the engine working across different s
 
 | Command | Description |
 |---------|-------------|
+| *(no args)* or `menu` | Launch guided interactive mode. |
 | `run` | **Primary.** Fetch signals, generate v2.0 strategy, write all artifacts. Persists run to SQLite. |
 | `eval` | Quality gate: validate schema, evidence links, and scores; write `eval_report.md`. Exit 0 if all pass, 1 otherwise. |
 | `bundle` | Validate artifacts, copy to `bundle/`, create zip. Defaults to latest run under `out/`. |
 | `history` | Show recent runs from the local SQLite database. |
 | `compare` | Aggregate and compare opportunity scores across recent runs for a city + industry. |
+| `opp list` | List stored opportunities with workflow status (filterable). |
+| `opp set <ID>` | Transition an opportunity to a new workflow status. |
 
 ### `history` options
 
@@ -340,8 +409,9 @@ marketscout/
 │   ├── 2.png                        # Vancouver Real Estate demo screenshot
 │   └── 3.png                        # Toronto Retail demo screenshot
 ├── src/marketscout/
-│   ├── cli.py                       # run | eval | bundle | history | compare
+│   ├── cli.py                       # run | eval | bundle | history | compare | opp | menu
 │   ├── db.py                        # SQLite persistence (stdlib sqlite3 only)
+│   ├── interactive.py               # guided terminal menu (no extra dependencies)
 │   ├── normalize.py                 # city + industry normalization and validation
 │   ├── config.py                    # env-var overrides (cache TTL, strategy mode, etc.)
 │   ├── cache.py                     # disk cache read/write with TTL
@@ -359,6 +429,7 @@ marketscout/
     ├── conftest.py
     ├── test_cli.py                  # run, eval, bundle, fetch status, run metadata
     ├── test_db.py                   # SQLite persistence: init, save, list, compare, history/compare CLI
+    ├── test_interactive.py          # interactive mode: menu dispatch, guided flows, API key setup, CLI entry
     ├── test_strategy.py             # scoring, deterministic, evidence integrity, reports, leads
     ├── test_normalize.py            # city/industry normalization, template lookup, CLI validation
     ├── test_scout.py                # headlines, jobs, Adzuna provider
