@@ -12,13 +12,17 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from marketscout.db import (
+    VALID_STATUSES,
     compare_runs,
     generate_run_id,
     get_connection,
     get_db_path,
+    get_trend_data,
     init_db,
+    list_opportunities,
     list_runs,
     save_run,
+    update_opportunity_status,
 )
 
 
@@ -274,6 +278,167 @@ def test_cmd_compare_no_data(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert "No runs found" in result.stdout
+
+
+# ── workflow: update_opportunity_status ───────────────────────────────────────
+
+def test_valid_statuses_tuple():
+    assert "discovered" in VALID_STATUSES
+    assert "prioritized" in VALID_STATUSES
+    assert "rejected" in VALID_STATUSES
+    assert "pursued" in VALID_STATUSES
+
+
+def test_update_status_transitions(tmp_path):
+    conn = _tmp_conn(tmp_path)
+    _save_one(conn, run_id="ws-1")
+    opp_id = conn.execute("SELECT id FROM opportunities WHERE run_id='ws-1'").fetchone()["id"]
+
+    assert update_opportunity_status(conn, opp_id, "under_review") is True
+    row = conn.execute("SELECT status FROM opportunities WHERE id=?", (opp_id,)).fetchone()
+    assert row["status"] == "under_review"
+    conn.close()
+
+
+def test_update_status_records_event(tmp_path):
+    conn = _tmp_conn(tmp_path)
+    _save_one(conn, run_id="ws-2")
+    opp_id = conn.execute("SELECT id FROM opportunities WHERE run_id='ws-2'").fetchone()["id"]
+
+    update_opportunity_status(conn, opp_id, "prioritized", note="Strong signal")
+    event = conn.execute(
+        "SELECT * FROM workflow_events WHERE opp_id=?", (opp_id,)
+    ).fetchone()
+    assert event["from_status"] == "discovered"
+    assert event["to_status"] == "prioritized"
+    assert event["note"] == "Strong signal"
+    conn.close()
+
+
+def test_update_status_returns_false_for_unknown_id(tmp_path):
+    conn = _tmp_conn(tmp_path)
+    result = update_opportunity_status(conn, 99999, "rejected")
+    assert result is False
+    conn.close()
+
+
+def test_update_status_raises_for_invalid_status(tmp_path):
+    conn = _tmp_conn(tmp_path)
+    _save_one(conn, run_id="ws-3")
+    opp_id = conn.execute("SELECT id FROM opportunities WHERE run_id='ws-3'").fetchone()["id"]
+    with pytest.raises(ValueError, match="Invalid status"):
+        update_opportunity_status(conn, opp_id, "wont_happen")
+    conn.close()
+
+
+# ── list_opportunities ─────────────────────────────────────────────────────────
+
+def test_list_opportunities_returns_all(tmp_path):
+    conn = _tmp_conn(tmp_path)
+    _save_one(conn, run_id="lo-1", city="Vancouver", industry="Construction")
+    rows = list_opportunities(conn)
+    assert len(rows) >= 1
+    conn.close()
+
+
+def test_list_opportunities_filters_by_status(tmp_path):
+    conn = _tmp_conn(tmp_path)
+    _save_one(conn, run_id="lo-2")
+    opp_id = conn.execute("SELECT id FROM opportunities WHERE run_id='lo-2'").fetchone()["id"]
+    update_opportunity_status(conn, opp_id, "prioritized")
+
+    prioritized = list_opportunities(conn, status="prioritized")
+    discovered = list_opportunities(conn, status="discovered")
+    assert any(r["id"] == opp_id for r in prioritized)
+    assert not any(r["id"] == opp_id for r in discovered)
+    conn.close()
+
+
+def test_list_opportunities_filters_by_city_industry(tmp_path):
+    conn = _tmp_conn(tmp_path)
+    _save_one(conn, run_id="lo-3", city="Toronto", industry="Retail")
+    _save_one(conn, run_id="lo-4", city="Vancouver", industry="Construction")
+
+    toronto_rows = list_opportunities(conn, city="Toronto", industry="Retail")
+    assert all(r["city"] == "Toronto" for r in toronto_rows)
+    conn.close()
+
+
+# ── get_trend_data ─────────────────────────────────────────────────────────────
+
+def test_get_trend_data_empty(tmp_path):
+    conn = _tmp_conn(tmp_path)
+    result = get_trend_data(conn, "Vancouver", "Construction")
+    assert result == []
+    conn.close()
+
+
+def test_get_trend_data_single_run(tmp_path):
+    conn = _tmp_conn(tmp_path)
+    _save_one(conn, run_id="td-1", city="Vancouver", industry="Construction")
+    result = get_trend_data(conn, "Vancouver", "Construction")
+    assert len(result) >= 1
+    assert result[0]["trend"] == "single"
+    conn.close()
+
+
+def test_get_trend_data_trend_direction(tmp_path):
+    """Opportunity appearing twice with rising pain is classified as 'rising'."""
+    conn = _tmp_conn(tmp_path)
+    strategy = _make_strategy(pain=4.0)
+    for run_id, ts, pain in [
+        ("td-rising-a", "2024-01-01T00:00:00Z", 4.0),
+        ("td-rising-b", "2024-06-01T00:00:00Z", 8.5),
+    ]:
+        strat = _make_strategy(pain=pain)
+        save_run(
+            conn=conn, run_id=run_id, city="Vancouver", industry="Construction",
+            strategy=strat, headlines=[], jobs=[], fetch_status={},
+            run_metadata={"started_at_iso": ts, "deterministic": False},
+            strategy_mode="mock",
+        )
+    result = get_trend_data(conn, "Vancouver", "Construction", limit_runs=5)
+    assert len(result) == 1
+    assert result[0]["trend"] == "rising"
+    conn.close()
+
+
+def test_get_trend_data_stable(tmp_path):
+    conn = _tmp_conn(tmp_path)
+    for run_id, ts in [("td-s-a", "2024-01-01T00:00:00Z"), ("td-s-b", "2024-06-01T00:00:00Z")]:
+        strat = _make_strategy(pain=5.0)
+        save_run(
+            conn=conn, run_id=run_id, city="Vancouver", industry="Construction",
+            strategy=strat, headlines=[], jobs=[], fetch_status={},
+            run_metadata={"started_at_iso": ts, "deterministic": False},
+            strategy_mode="mock",
+        )
+    result = get_trend_data(conn, "Vancouver", "Construction")
+    assert result[0]["trend"] == "stable"
+    conn.close()
+
+
+# ── opp CLI commands ───────────────────────────────────────────────────────────
+
+def test_cmd_opp_list_no_data(tmp_path):
+    db_path = tmp_path / "empty.db"
+    result = subprocess.run(
+        [sys.executable, "-m", "marketscout", "opp", "list"],
+        capture_output=True, text=True,
+        env=_src_env(tmp_path, MARKETSCOUT_DB_PATH=str(db_path)),
+    )
+    assert result.returncode == 0, result.stderr
+    assert "No opportunities found" in result.stdout
+
+
+def test_cmd_opp_set_invalid_status(tmp_path):
+    db_path = tmp_path / "empty.db"
+    result = subprocess.run(
+        [sys.executable, "-m", "marketscout", "opp", "set", "1", "--status", "flying"],
+        capture_output=True, text=True,
+        env=_src_env(tmp_path, MARKETSCOUT_DB_PATH=str(db_path)),
+    )
+    assert result.returncode != 0
 
 
 # ── get_db_path ────────────────────────────────────────────────────────────────

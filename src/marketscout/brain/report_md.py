@@ -131,6 +131,14 @@ def strategy_to_markdown(
                 f"**Score breakdown:** signal_frequency={getattr(sb, 'signal_frequency', 0):.2f} | "
                 f"source_diversity={getattr(sb, 'source_diversity', 0):.2f} | job_role_density={getattr(sb, 'job_role_density', 0):.2f}\n"
             )
+        br = getattr(o, "brief", None)
+        if br is not None:
+            sections.append("**Brief:**\n")
+            sections.append(f"- **Likely buyer:** {getattr(br, 'likely_buyer', '')}")
+            sections.append(f"- **Pain theme:** {getattr(br, 'pain_theme', '')}")
+            sections.append(f"- **Commercial angle:** {getattr(br, 'commercial_angle', '')}")
+            sections.append(f"- **Suggested next step:** {getattr(br, 'suggested_next_step', '')}")
+            sections.append(f"- **Why now:** {getattr(br, 'why_now', '')}\n")
         sections.append("")
 
     # Leads section summary
