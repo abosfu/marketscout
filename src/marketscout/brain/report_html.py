@@ -111,26 +111,78 @@ def strategy_to_html(
                 + "</p>"
             )
 
+    _SUPPORT_COLOR = {"strong": "#1a7a1a", "moderate": "#a06000", "weak": "#c0392b"}
+
+    _REC_COLOR = {
+        "pursue_now":       "#1a7a1a",
+        "validate_further": "#a06000",
+        "monitor":          "#555555",
+        "deprioritize":     "#c0392b",
+    }
+
     opps = getattr(strategy, "opportunity_map", [])
     parts.append("<h2>Opportunity Map</h2>")
     if opps:
         parts.append(
-            "<table><thead><tr><th>Title</th><th>Pain</th><th>ROI signal</th><th>Confidence</th><th>Category</th></tr></thead><tbody>"
+            "<table><thead><tr><th>Title</th><th>Pain</th><th>ROI</th><th>Conf</th>"
+            "<th>Support</th><th>Recommendation</th><th>Type</th></tr></thead><tbody>"
         )
         for o in opps:
-            title = _escape((getattr(o, "title", "") or "")[:50])
+            raw_title = (getattr(o, "title", "") or "")[:40]
+            padded = getattr(o, "is_padded", False)
+            title = _escape(raw_title) + (" ⚠" if padded else "")
             pain = getattr(o, "pain_score", 0)
             roi = getattr(o, "roi_signal", 0)
             conf = getattr(o, "confidence", 0)
-            cat = _escape(getattr(o, "ai_category", ""))
-            parts.append(f"<tr><td>{title}</td><td>{pain}</td><td>{roi}</td><td>{conf:.2f}</td><td>{cat}</td></tr>")
+            support = getattr(o, "support_level", "moderate")
+            recommendation = getattr(o, "recommendation", "monitor")
+            opp_type = getattr(o, "opportunity_type", "operational")
+            support_color = _SUPPORT_COLOR.get(support, "#333")
+            rec_color = _REC_COLOR.get(recommendation, "#333")
+            parts.append(
+                f"<tr><td>{title}</td><td>{pain}</td><td>{roi}</td><td>{conf:.2f}</td>"
+                f"<td><span style='color:{support_color};font-weight:bold'>{_escape(support)}</span></td>"
+                f"<td><span style='color:{rec_color};font-weight:bold'>{_escape(recommendation)}</span></td>"
+                f"<td>{_escape(opp_type)}</td></tr>"
+            )
         parts.append("</tbody></table>")
+        parts.append("<p><small>⚠ = template-padded opportunity (limited direct evidence)</small></p>")
     else:
         parts.append("<p><em>No opportunities.</em></p>")
 
     for i, o in enumerate(opps, 1):
         title = _escape(getattr(o, "title", "") or f"Opportunity {i}")
         parts.append(f"<h3>{i}. {title}</h3>")
+
+        # Signal quality and identity block
+        support = getattr(o, "support_level", "moderate")
+        age_avg = getattr(o, "signal_age_days_avg", None)
+        unique_src = getattr(o, "unique_sources_count", 0)
+        is_padded = getattr(o, "is_padded", False)
+        recommendation = getattr(o, "recommendation", "monitor")
+        opp_type = getattr(o, "opportunity_type", "operational")
+        trend_key = getattr(o, "trend_key", "") or ""
+        age_str = f"{age_avg:.0f}d avg age" if age_avg is not None else "age unknown"
+        support_color = _SUPPORT_COLOR.get(support, "#333")
+        rec_color = _REC_COLOR.get(recommendation, "#333")
+        parts.append(
+            f"<p><strong>Signal quality:</strong> "
+            f"<span style='color:{support_color};font-weight:bold'>{_escape(support.upper())}</span> "
+            f"&nbsp;|&nbsp; {_escape(age_str)} &nbsp;|&nbsp; {unique_src} unique source(s)</p>"
+        )
+        key_frag = f" &nbsp;|&nbsp; key: <code>{_escape(trend_key)}</code>" if trend_key else ""
+        parts.append(
+            f"<p><strong>Decision:</strong> "
+            f"<span style='color:{rec_color};font-weight:bold'>{_escape(recommendation)}</span>"
+            f" &nbsp;|&nbsp; type: <code>{_escape(opp_type)}</code>{key_frag}</p>"
+        )
+        if is_padded:
+            parts.append(
+                "<p style='background:#fff3cd;padding:0.4rem;border-left:3px solid #f0ad4e'>"
+                "<strong>Template-padded</strong> — no direct keyword evidence found for this bottleneck. "
+                "Treat as hypothesis only; do not act without additional validation.</p>"
+            )
+
         parts.append(f"<p><strong>Problem:</strong> {_escape(getattr(o, 'problem', ''))}</p>")
         evidence_list = getattr(o, "evidence", []) or []
         if evidence_list:

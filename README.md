@@ -19,13 +19,13 @@ MarketScout takes two inputs — a city and an industry — fetches live headlin
 - Every `evidence.link` in `strategy.json` exists in `input_signals.json` — `eval` exits 1 if any link is absent
 - `--deterministic` seeds random at 42 and sorts all signals — two runs on the same inputs produce bit-identical outputs
 - `signal_analysis.json` records `live | cached | failed` per source; cache fallback is automatic and auditable
-- 86 tests cover schema, evidence integrity, deterministic mode, fetch status, and CLI artifact creation
+- 280 tests cover schema, evidence integrity, signal quality, trend quality, opportunity identity, deterministic mode, fetch status, and CLI artifact creation
 
 ---
 
 ## Prerequisites
 
-- **Python 3.11+** (`python3 --version`)
+- **Python 3.9+** (`python3 --version`)
 - **Adzuna API keys** — required for the default jobs provider. Register free at [developer.adzuna.com](https://developer.adzuna.com). You get `ADZUNA_APP_ID` and `ADZUNA_APP_KEY`.
 - **No Adzuna keys?** Add `--jobs-provider rss` to any `run` command to pull jobs from RSS instead. This works without keys and is the easiest way to test locally.
 
@@ -182,7 +182,7 @@ Each run writes artifacts to `out/<city>_<industry>_<date>/`.
 | File | Contents |
 |------|----------|
 | `input_signals.json` | Raw headlines and jobs as fetched — the ground truth for evidence links |
-| `strategy.json` | v2.0 opportunity map: 5–8 items, each with `pain_score`, `roi_signal`, `confidence`, `score_breakdown`, `business_case`, and sourced `evidence` |
+| `strategy.json` | v2.0 opportunity map: 5–8 items, each with `pain_score`, `roi_signal`, `confidence`, `score_breakdown`, `business_case`, sourced `evidence`, `support_level`, `recommendation`, `opportunity_type`, and `trend_key` |
 | `signal_analysis.json` | Fetch status per source, run metadata (timestamp, duration, `cache_used`), keyword hits, derived tags |
 | `report.md` | Markdown report: Executive Summary, Signal Analysis, Opportunity Map with score breakdown |
 | `report.html` | Same content as `report.md` in a self-contained HTML file |
@@ -217,18 +217,19 @@ PYTHONPATH=src python3 -m marketscout compare \
   --city Toronto --industry Retail --limit-runs 5
 ```
 
-`compare` shows each run's metadata alongside an aggregated opportunity table: average `pain_score`, `roi_signal`, `confidence`, and how many runs each opportunity appeared in — useful for spotting consistently high-signal opportunities across multiple fetches.
+`compare` shows each run's metadata alongside two aggregated tables: an opportunity table (average `pain_score`, `roi_signal`, `confidence`, appearances, padded count, strong-support count), and a quality-aware Signal Trends table showing trend direction (`rising/stable/falling`), trend quality (`investable/monitor/noise/emerging/declining`), and a plain-language history summary — useful for spotting consistently high-signal opportunities across multiple fetches.
 
 > DB failures are silently swallowed — if the database is unavailable, artifact generation always completes normally.
 
-**Database schema (4 tables):**
+**Database schema (5 tables):**
 
 | Table | Key columns |
 |-------|-------------|
 | `runs` | `run_id`, `city`, `industry`, `strategy_mode`, `coverage_score`, `headlines_count`, `jobs_count` |
-| `opportunities` | `run_id` FK, `title`, `pain_score`, `roi_signal`, `confidence`, `ai_category` |
+| `opportunities` | `run_id` FK, `title`, `pain_score`, `roi_signal`, `confidence`, `ai_category`, `status`, `support_level`, `is_padded`, `signal_age_days_avg`, `unique_sources_count`, `trend_key`, `recommendation` |
 | `signals` | `run_id` FK, `source_type` (headline/job), `provider`, `title`, `link`, `company` |
 | `leads` | `run_id` FK, `company`, `job_count`, `readiness_score` |
+| `workflow_events` | `opp_id` FK, `from_status`, `to_status`, `note`, `changed_at` |
 
 ---
 
@@ -296,7 +297,7 @@ make test
 PYTHONPATH=src python3 -m pytest tests/ -v
 ```
 
-86 tests covering: schema validation, deterministic mode, evidence link integrity, fetch status (live/cached/failed), CLI artifact creation, eval pass/fail cases, bundle creation, cache TTL, provider parsing, and input normalization. All tests run without network access — fetches are mocked.
+280 tests covering: schema validation, deterministic mode, evidence link integrity, signal quality classification, per-opportunity freshness, trend quality, opportunity identity and recommendation, fetch status (live/cached/failed), CLI artifact creation, eval pass/fail cases, bundle creation, cache TTL, provider parsing, and input normalization. All tests run without network access — fetches are mocked.
 
 ---
 
@@ -323,6 +324,8 @@ Three cities and industries chosen to show the engine working across different s
 - **City + industry → opportunity map.** Two inputs, no config. The engine fetches live signals, maps them through industry keyword templates, and produces 5–8 ranked opportunities — each with a problem statement, sourced evidence, and estimated business case.
 - **Live signals from news + jobs.** Headlines come from Google News RSS; job postings from Adzuna or RSS. Both sources are fetched fresh each run and cached to disk for resilience.
 - **Proof metrics and score breakdown.** Every opportunity carries `score_breakdown: {signal_frequency, source_diversity, job_role_density}` summing to 1.0. These weights drive `pain_score` and `roi_signal` — the ranking is decomposable, not a black box.
+- **Signal quality classification.** Each opportunity is classified as `strong`, `moderate`, or `weak` based on evidence count, cross-source mix (news + jobs), per-opportunity average signal age, and unique source diversity. Template-padded opportunities (no direct keyword evidence) are explicitly flagged with `is_padded=True` and surfaced with a warning in both reports.
+- **Rule-based recommendation layer.** Each opportunity gets a machine-readable `recommendation` (`pursue_now`, `validate_further`, `monitor`, or `deprioritize`) derived from support level, confidence, pain score, signal freshness, and padding — no LLM required. A stable `trend_key` enables cross-run identity tracking even as titles evolve.
 - **Eval gate preventing hallucinated evidence.** `eval` cross-checks every `evidence.link` in `strategy.json` against `input_signals.json`. If any link is absent, the gate exits 1. You cannot ship an unverified report.
 - **Deterministic mode for reproducibility.** `--deterministic` seeds random at 42, sorts all input signals by title, and uses stable opportunity ordering. Two runs on the same inputs produce bit-identical `strategy.json` — auditable and directly comparable.
 
@@ -389,10 +392,11 @@ Three cities and industries chosen to show the engine working across different s
 ## Architecture
 
 - **Scout** — Fetches headlines (Google News RSS) and jobs (Adzuna or RSS). Falls back to disk cache on failure. Records `fetch_status` per source (`live | cached | failed`).
-- **Brain** — Industry templates map keywords → bottleneck tags → opportunity titles. Scores `pain_score`, `automation_potential`, `roi_signal`, `confidence` from signal frequency, source diversity, and job role density. Produces `score_breakdown` weights summing to 1.0.
-- **Reports** — Markdown and HTML generators consume `strategy.json` + `signal_analysis.json` and emit: Executive Summary, Fetch Status, Signal Analysis, Opportunity Map (with score breakdown), Leads summary, Sources.
+- **Brain** — Industry templates map keywords → bottleneck tags → opportunity titles. Scores `pain_score`, `automation_potential`, `roi_signal`, `confidence` from signal frequency, source diversity, and job role density per opportunity. Classifies each opportunity with `support_level` (strong/moderate/weak) from evidence count, cross-source mix, per-opportunity freshness, and unique source diversity. Flags template-padded opportunities with `is_padded=True`. Assigns a stable `trend_key` for cross-run identity, a rule-based `recommendation` (pursue_now/monitor/validate_further/deprioritize), and an `opportunity_type` (operational/strategic/compliance).
+- **DB** — SQLite persistence (stdlib only). Every run stores its opportunities with all quality fields. `compare` aggregates across runs with quality-aware trend classification (`investable/monitor/noise/emerging/declining`).
+- **Reports** — Markdown and HTML generators consume `strategy.json` + `signal_analysis.json` and emit: Executive Summary, Signal Analysis, Opportunity Map (with support level, recommendation, and type), per-opportunity detail (signal quality, decision line, brief), Leads, Sources.
 
-Flow: `run` → fetch signals → build signal analysis → generate v2.0 strategy → write artifacts → print Rich tables.
+Flow: `run` → fetch signals → build signal analysis → generate v2.0 strategy → write artifacts → persist to SQLite → print Rich tables.
 
 ---
 

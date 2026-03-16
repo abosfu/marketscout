@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import os
 import random
-from datetime import datetime
+import re
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Literal
 
@@ -43,6 +44,11 @@ _W_FREQ: float = 0.5   # weight for evidence frequency (raw_freq in [0,1])
 _W_DIV: float = 0.3    # weight for source diversity (raw_div_norm in [0,1])
 _W_JOB: float = 0.2    # weight for job-role density (raw_job in [0,1])
 
+# Signal freshness thresholds (days). Used for per-opportunity confidence and support_level.
+_FRESHNESS_VERY_FRESH_DAYS: int = 7    # < 7 days: very fresh
+_FRESHNESS_FRESH_DAYS: int = 30        # < 30 days: fresh
+_FRESHNESS_MODERATE_DAYS: int = 90    # < 90 days: moderate; >= 90 days: stale
+
 # ── Opportunity brief ──────────────────────────────────────────────────────────
 
 # Default decision-maker persona per industry
@@ -56,7 +62,7 @@ _BUYER_MAP: dict[str, str] = {
     "Professional Services": "Managing Partner / Practice Lead",
 }
 
-# Commercial angle by AI category
+# Commercial angle fallback by AI category (used when problem-specific angle is unavailable)
 _COMMERCIAL_MAP: dict[str, str] = {
     "Operational efficiency": "Workflow automation, scheduling software, or process integration",
     "Cost reduction": "Cost-reduction consulting, outsourcing, or efficiency SaaS",
@@ -67,6 +73,116 @@ _COMMERCIAL_MAP: dict[str, str] = {
     "Partnership and M&A": "Deal sourcing, due-diligence tooling, or partnership advisory",
 }
 
+# Opportunity type derived from AI category
+_OPPORTUNITY_TYPE_MAP: dict[str, str] = {
+    "Operational efficiency": "operational",
+    "Cost reduction":         "operational",
+    "Risk mitigation":        "compliance",
+    "Regulatory & permits":   "compliance",
+    "Market entry":           "strategic",
+    "Growth and scale":       "strategic",
+    "Partnership and M&A":    "strategic",
+}
+
+
+def _slugify(s: str) -> str:
+    """Convert a string to a lowercase underscore slug for stable key generation."""
+    s = s.lower().strip()
+    s = re.sub(r"[^a-z0-9]+", "_", s)
+    return s.strip("_")
+
+
+def _make_trend_key(problem: str, ai_category: str, is_padded: bool) -> str:
+    """
+    Compute a stable canonical identifier for cross-run opportunity tracking.
+
+    Format:
+      Real opportunities:   "{category_slug}::{problem_slug}"
+      Padded opportunities: "padded::{problem_slug}"
+
+    Stability guarantees:
+      - Uses the full problem string, not the truncated title.
+      - City-specific text is stripped from padded fallback labels
+        (e.g. "Market dynamics in Vancouver" → "padded::market_dynamics").
+      - Lowercase + non-alphanumeric chars collapsed to underscores.
+      - Deterministic: same inputs always produce the same key.
+    """
+    # Strip trailing city references from padded labels ("... in Vancouver")
+    prob_clean = re.sub(r"\bin\s+\w[\w\s]*$", "", problem, flags=re.IGNORECASE).strip()
+    prob_slug = _slugify(prob_clean or problem)
+    if is_padded:
+        return f"padded::{prob_slug}"
+    return f"{_slugify(ai_category)}::{prob_slug}"
+
+
+def _classify_recommendation(
+    support_level: str,
+    confidence: float,
+    pain_score: float,
+    is_padded: bool,
+    avg_age_days: float | None,
+) -> str:
+    """
+    Rule-based decision recommendation integrating all quality signals.
+
+    Rules evaluated in priority order:
+      deprioritize    — padded; or weak + low confidence (<0.35); or stale + low pain (<5.0)
+      pursue_now      — strong support + confidence >=0.60 + pain >=6.0 + fresh (<30d)
+      validate_further— moderate-or-better support + confidence >=0.35
+      monitor         — everything else
+    """
+    # 1. Deprioritize: padded noise, very weak evidence, or stale low-pain signal
+    if is_padded:
+        return "deprioritize"
+    if support_level == "weak" and confidence < 0.35:
+        return "deprioritize"
+    if avg_age_days is not None and avg_age_days >= _FRESHNESS_MODERATE_DAYS and pain_score < 5.0:
+        return "deprioritize"
+    # 2. Pursue now: strong signal with fresh, high-confidence evidence
+    if (
+        support_level == "strong"
+        and confidence >= 0.60
+        and pain_score >= 6.0
+        and (avg_age_days is None or avg_age_days < _FRESHNESS_FRESH_DAYS)
+    ):
+        return "pursue_now"
+    # 3. Validate further: has real evidence, worth investigating
+    if support_level in ("moderate", "strong") and confidence >= 0.35:
+        return "validate_further"
+    # 4. Monitor: low confidence or borderline quality — watch across runs
+    return "monitor"
+
+
+def _classify_opportunity_type(ai_category: str) -> str:
+    """Classify opportunity as operational, strategic, or compliance from its AI category."""
+    return _OPPORTUNITY_TYPE_MAP.get(ai_category, "operational")
+
+
+def _build_problem_specific_commercial_angle(problem: str, ai_category: str) -> str:
+    """
+    Return a commercial angle grounded in the actual bottleneck problem,
+    not just the AI category. Falls back to the category-level angle when
+    no specific keyword matches.
+    """
+    low = problem.lower()
+    if any(kw in low for kw in ("labor", "labour", "staff", "workforce", "wage", "hiring", "talent", "shortage")):
+        return "Workforce management platforms, staffing SaaS, or labor analytics tooling"
+    if any(kw in low for kw in ("permit", "regulat", "compliance", "zoning", "environmental")):
+        return "Permitting workflow software, compliance monitoring, or regulatory advisory services"
+    if any(kw in low for kw in ("supply chain", "logistics", "procurement", "material", "inventory")):
+        return "Supply chain visibility software, procurement automation, or vendor management tooling"
+    if any(kw in low for kw in ("cost", "inflation", "rate", "financing", "reimbursement", "margin", "pricing", "energy")):
+        return "Cost analytics, financial modeling tools, or procurement optimization services"
+    if any(kw in low for kw in ("technology", "digital", "omnichannel", "ecommerce", "infrastructure", "scale")):
+        return "Digital transformation consulting, integration platforms, or SaaS tooling"
+    if any(kw in low for kw in ("security", "cyber", "risk")):
+        return "Cybersecurity tooling, risk assessment platforms, or managed security services"
+    if any(kw in low for kw in ("competition", "market", "partnership", "growth", "differentiation", "funding")):
+        return "Market intelligence platforms, go-to-market advisory, or strategic consulting"
+    if any(kw in low for kw in ("skill", "training", "education")):
+        return "Workforce training platforms, upskilling programs, or L&D consulting"
+    return _COMMERCIAL_MAP.get(ai_category, "Software tools or consulting services addressing this bottleneck")
+
 
 def _build_opportunity_brief(
     title: str,
@@ -74,10 +190,15 @@ def _build_opportunity_brief(
     pain_score: float,
     evidence: list[EvidenceItem],
     industry: str,
+    *,
+    avg_age_days: float | None = None,
+    unique_sources_count: int = 0,
+    support_level: str = "moderate",
 ) -> OpportunityBrief:
     """
     Derive a structured, deterministic decision brief from scoring and evidence.
     No LLM required — all fields come from template mappings and evidence metadata.
+    avg_age_days and unique_sources_count ground the why_now field in actual signal data.
     """
     # Likely buyer: start from industry default, then refine from job titles in evidence
     buyer = _BUYER_MAP.get(industry, "Operations Manager / Decision-Maker")
@@ -98,14 +219,16 @@ def _build_opportunity_brief(
     # pain_theme: the bottleneck label, cleaned up
     pain_theme = title.rstrip(".")
 
-    # commercial_angle from ai_category lookup
-    commercial_angle = _COMMERCIAL_MAP.get(
-        ai_category,
-        "Software tools or consulting services addressing this bottleneck",
-    )
+    # commercial_angle: problem-specific first, category fallback if no keyword match
+    commercial_angle = _build_problem_specific_commercial_angle(title, ai_category)
 
-    # suggested_next_step from pain severity
-    if pain_score >= 8.0:
+    # suggested_next_step: weak support overrides pain ladder (evidence not strong enough to act on)
+    if support_level == "weak":
+        next_step = (
+            "Validate signal quality before acting — evidence is thin or stale; "
+            "run additional data collection to confirm the opportunity"
+        )
+    elif pain_score >= 8.0:
         next_step = (
             "Initiate direct outreach — signal strength is high; "
             "qualified buyers likely have active budget or mandate"
@@ -117,20 +240,45 @@ def _build_opportunity_brief(
     else:
         next_step = "Watch signal over next 2–3 runs; low confidence — validate before pursuing"
 
-    # why_now from evidence breadth
+    # why_now: grounded in actual evidence age and source diversity, not just count
     n_ev = len(evidence)
     has_both = any(e.source == "headline" for e in evidence) and any(e.source == "job" for e in evidence)
+
+    freshness_clause = ""
+    if avg_age_days is not None:
+        bucket = _freshness_bucket(avg_age_days)
+        label_map = {
+            "very_fresh": "very fresh",
+            "fresh": "fresh",
+            "moderate": "moderate recency",
+            "stale": "stale — consider rerunning",
+        }
+        freshness_clause = f"signals avg {avg_age_days:.0f}d old ({label_map[bucket]})"
+
+    source_clause = f"{unique_sources_count} unique sources" if unique_sources_count > 1 else ""
+
     if n_ev >= 4 and has_both:
-        why_now = (
-            f"{n_ev} independent signals across news and job postings indicate "
-            "the problem is active and broadly felt right now"
-        )
+        parts = [f"{n_ev} cross-type signals (news + jobs)"]
+        if source_clause:
+            parts.append(source_clause)
+        if freshness_clause:
+            parts.append(freshness_clause)
+        why_now = "; ".join(parts)
     elif n_ev >= 3:
-        why_now = f"{n_ev} signals this cycle confirm the problem is present; cross-source coverage is partial"
+        parts = [f"{n_ev} signals confirm the problem this cycle"]
+        if freshness_clause:
+            parts.append(freshness_clause)
+        why_now = "; ".join(parts) + " — cross-source coverage partial"
     elif n_ev >= 2:
-        why_now = "Signal present but narrow; confirm with additional run before treating as primary thesis"
+        base = "Signal present but narrow"
+        if freshness_clause:
+            base += f"; {freshness_clause}"
+        why_now = base + " — confirm with additional run before treating as primary thesis"
     else:
         why_now = "Weak or single-source signal; use as early indicator only — not yet investable"
+
+    if support_level == "weak" and n_ev > 1:
+        why_now += " [low-confidence: verify before acting]"
 
     return OpportunityBrief(
         likely_buyer=buyer,
@@ -154,6 +302,65 @@ def _parse_timestamp(ts: str) -> datetime | None:
         return parsedate_to_datetime(ts)
     except Exception:
         return None
+
+
+def _signal_age_days(published: str, now: datetime | None = None) -> float | None:
+    """Return age of a signal in days from its published timestamp, or None if unparseable."""
+    ts = _parse_timestamp(published)
+    if ts is None:
+        return None
+    if now is None:
+        now = datetime.now(tz=timezone.utc)
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return max(0.0, (now - ts).total_seconds() / 86400.0)
+
+
+def _freshness_bucket(age_days: float) -> str:
+    """Classify signal age into a named bucket for display and decision logic."""
+    if age_days < _FRESHNESS_VERY_FRESH_DAYS:
+        return "very_fresh"
+    if age_days < _FRESHNESS_FRESH_DAYS:
+        return "fresh"
+    if age_days < _FRESHNESS_MODERATE_DAYS:
+        return "moderate"
+    return "stale"
+
+
+def _classify_support_level(
+    evidence_count: int,
+    has_headline: bool,
+    has_job: bool,
+    avg_age_days: float | None,
+    unique_sources: int,
+    is_padded: bool,
+) -> str:
+    """
+    Classify signal quality as 'strong', 'moderate', or 'weak'.
+
+    Weak when any of: padded, <2 evidence, stale (>=90 days avg), <2 unique sources.
+    Strong when all of: >=4 evidence, both source types, >=3 unique sources, fresh (<30 days avg).
+    Moderate: everything else.
+    """
+    if is_padded:
+        return "weak"
+    if evidence_count < 2:
+        return "weak"
+    if avg_age_days is not None and avg_age_days >= _FRESHNESS_MODERATE_DAYS:
+        return "weak"
+    if unique_sources < 2:
+        return "weak"
+    if (
+        evidence_count >= 4
+        and has_headline
+        and has_job
+        and unique_sources >= 3
+        and (avg_age_days is None or avg_age_days < _FRESHNESS_FRESH_DAYS)
+    ):
+        return "strong"
+    return "moderate"
 
 
 def _compute_signals_used(headlines: list[dict[str, Any]], jobs: list[dict[str, Any]]) -> SignalsUsed:
@@ -238,12 +445,31 @@ def _roi_signal_from_jobs(jobs: list[dict[str, Any]], evidence_from_jobs: int) -
     return max(0.0, min(10.0, round(score + evidence_from_jobs * 0.3, 1)))
 
 
-def _confidence_single(evidence_count: int, has_headline: bool, has_job: bool, freshness_days: int) -> float:
-    """Per-opportunity confidence from evidence count, source mix, and freshness."""
-    count_factor = min(1.0, evidence_count / 5.0) * 0.5
-    mix = 0.2 if (has_headline and has_job) else (0.1 if (has_headline or has_job) else 0.0)
-    freshness = max(0.0, 1.0 - freshness_days / 90.0) * 0.3
-    return max(0.0, min(1.0, round(count_factor + mix + freshness, 3)))
+def _confidence_single(
+    evidence_count: int,
+    has_headline: bool,
+    has_job: bool,
+    avg_age_days: float | None,
+    unique_source_count: int,
+) -> float:
+    """
+    Per-opportunity confidence from evidence count, cross-source mix,
+    per-opportunity freshness, and unique source diversity.
+
+    Weights sum to 1.0 at maximum:
+      count_factor: up to 0.40 (evidence quantity, plateau at 5)
+      mix:          0.15 if both headline+job, 0.08 if either
+      freshness:    up to 0.30 (per-opportunity avg age, zero at 90+ days)
+      source_div:   up to 0.15 (unique publishers/companies, plateau at 3)
+    """
+    count_factor = min(1.0, evidence_count / 5.0) * 0.40
+    mix = 0.15 if (has_headline and has_job) else (0.08 if (has_headline or has_job) else 0.0)
+    if avg_age_days is None:
+        freshness = 0.10  # Unknown age: mild conservative penalty
+    else:
+        freshness = max(0.0, 1.0 - avg_age_days / _FRESHNESS_MODERATE_DAYS) * 0.30
+    source_div = min(1.0, unique_source_count / 3.0) * 0.15
+    return max(0.0, min(1.0, round(count_factor + mix + freshness + source_div, 3)))
 
 
 def build_signal_analysis(
@@ -347,7 +573,6 @@ def _build_opportunity_map(
     industry: str,
     city: str,
     template: IndustryTemplate,
-    data_quality: DataQuality,
     *,
     deterministic: bool = False,
 ) -> list[OpportunityItem]:
@@ -361,6 +586,9 @@ def _build_opportunity_map(
     where raw_div is normalised to [0,1] (raw_div * 2), so max weighted = 1.0 and max pain = 10.0.
     score_breakdown shows the proportional contribution of each weighted component.
     roi_signal and automation_potential are computed per-opportunity from that opportunity's evidence.
+    Confidence is computed from per-opportunity freshness (not a global window).
+    Signals can match multiple keywords — a signal contributes to every bottleneck whose keyword it contains.
+    Padded/fallback opportunities are flagged with is_padded=True and support_level="weak".
     """
     keyword_to_bottleneck = template.keyword_to_bottleneck() if template else {}
     if not keyword_to_bottleneck:
@@ -381,10 +609,30 @@ def _build_opportunity_map(
     for kw, bn in keyword_to_bottleneck.items():
         bottleneck_to_keywords.setdefault(bn, set()).add(kw)
 
-    # Collect (bottleneck, evidence_list) from headlines and jobs
+    # Build per-signal metadata lookups (link → published timestamp, link → source name)
+    link_to_published: dict[str, str] = {}
+    link_to_source_name: dict[str, str] = {}
+    for h in headlines:
+        lnk = (h.get("link") or "#").strip()
+        link_to_published[lnk] = h.get("published", "") or ""
+        src_name = (h.get("source") or "").strip()
+        if src_name and lnk != "#":
+            link_to_source_name[lnk] = src_name
+    for j in jobs:
+        lnk = (j.get("link") or "#").strip()
+        link_to_published[lnk] = j.get("published", "") or ""
+        company = (j.get("company") or "").strip()
+        if company and lnk != "#":
+            link_to_source_name[lnk] = company
+
+    # Fix the reference time once per run (avoids drift between opportunities in the same run)
+    now = datetime.now(tz=timezone.utc)
+
+    # Bucket signals by keyword → bottleneck.
+    # Multi-keyword: a signal is added to EVERY bucket whose keyword appears in its title.
+    # Per-bucket dedup: same link cannot appear twice in the same bucket.
     bucket: dict[str, list[EvidenceItem]] = {}
-    used_headline_links: set[str] = set()
-    used_job_links: set[str] = set()
+    bucket_link_sets: dict[str, set[str]] = {}
 
     for h in headlines:
         title = (h.get("title") or "").strip()
@@ -397,10 +645,11 @@ def _build_opportunity_map(
                 key = problem
                 if key not in bucket:
                     bucket[key] = []
-                if link not in used_headline_links and len(bucket[key]) < 5:
+                    bucket_link_sets[key] = set()
+                if link not in bucket_link_sets[key] and len(bucket[key]) < 5:
                     bucket[key].append(EvidenceItem(title=title, link=link, source="headline"))
-                    used_headline_links.add(link)
-                break
+                    bucket_link_sets[key].add(link)
+                # No break — allow a signal to match multiple bottlenecks
 
     for j in jobs:
         title = (j.get("title") or "").strip()
@@ -413,10 +662,11 @@ def _build_opportunity_map(
                 key = problem
                 if key not in bucket:
                     bucket[key] = []
-                if link not in used_job_links and len(bucket[key]) < 5:
+                    bucket_link_sets[key] = set()
+                if link not in bucket_link_sets[key] and len(bucket[key]) < 5:
                     bucket[key].append(EvidenceItem(title=title, link=link, source="job"))
-                    used_job_links.add(link)
-                break
+                    bucket_link_sets[key].add(link)
+                # No break — allow a signal to match multiple bottlenecks
 
     # Build OpportunityItem for each bucket with transparent per-opportunity scoring.
     opportunities: list[OpportunityItem] = []
@@ -429,6 +679,22 @@ def _build_opportunity_map(
         has_job = any(e.source == "job" for e in evidence_list)
         n_evidence = len(evidence_list)
         n_job_evidence = sum(1 for e in evidence_list if e.source == "job")
+
+        # Per-opportunity freshness: average age of evidence signals in days
+        ages: list[float] = []
+        for e in evidence_list:
+            age = _signal_age_days(link_to_published.get(e.link, ""), now=now)
+            if age is not None:
+                ages.append(age)
+        avg_age_days: float | None = (sum(ages) / len(ages)) if ages else None
+
+        # Per-opportunity unique source count (unique publishers / companies in evidence)
+        source_names = {
+            link_to_source_name.get(e.link, e.link)
+            for e in evidence_list
+            if e.link != "#"
+        }
+        unique_sources_count = len(source_names)
 
         # Raw score components (all normalised to [0, 1])
         raw_freq = min(1.0, n_evidence / 5.0)
@@ -460,7 +726,14 @@ def _build_opportunity_map(
         opp_evidence_titles = " ".join(e.title for e in evidence_list)
         automation = _automation_potential_from_tag(problem, opp_evidence_titles)
 
-        confidence = _confidence_single(n_evidence, has_headline, has_job, data_quality.freshness_window_days)
+        # Confidence uses per-opportunity freshness and unique source count (not global window)
+        confidence = _confidence_single(n_evidence, has_headline, has_job, avg_age_days, unique_sources_count)
+
+        # Signal quality classification
+        support_level = _classify_support_level(
+            n_evidence, has_headline, has_job, avg_age_days, unique_sources_count, is_padded=False
+        )
+
         ai_cat = _bottleneck_to_ai_category(problem, template)
         title_short = problem[:50] + ("..." if len(problem) > 50 else "")
         brief = _build_opportunity_brief(
@@ -469,7 +742,13 @@ def _build_opportunity_map(
             pain_score=pain_score,
             evidence=evidence_list,
             industry=industry,
+            avg_age_days=avg_age_days,
+            unique_sources_count=unique_sources_count,
+            support_level=support_level,
         )
+        opp_trend_key = _make_trend_key(problem, ai_cat, is_padded=False)
+        opp_recommendation = _classify_recommendation(support_level, confidence, pain_score, False, avg_age_days)
+        opp_type = _classify_opportunity_type(ai_cat)
         opportunities.append(
             OpportunityItem(
                 title=title_short,
@@ -489,13 +768,20 @@ def _build_opportunity_map(
                 ),
                 score_breakdown=sb,
                 brief=brief,
+                support_level=support_level,
+                signal_age_days_avg=round(avg_age_days, 1) if avg_age_days is not None else None,
+                unique_sources_count=unique_sources_count,
+                is_padded=False,
+                trend_key=opp_trend_key,
+                recommendation=opp_recommendation,
+                opportunity_type=opp_type,
             )
         )
 
     # Pad to 5 using template bottlenecks not yet covered.
-    # For each padded bottleneck, prefer signals whose titles contain a related keyword
-    # so evidence stays semantically connected to the problem.
-    # Prefer items with real (non-placeholder) links to keep evidence traceable.
+    # Padded opportunities are explicitly flagged: is_padded=True, support_level="weak".
+    # Evidence is drawn from the nearest available real signals for traceability,
+    # but these opportunities have NO direct keyword evidence backing them.
     bottleneck_list = list(keyword_to_bottleneck.values()) or [f"Market dynamics in {city}"]
     all_sources: list[tuple[str, str, Literal["headline", "job"]]] = []
     for h in headlines[:8]:
@@ -548,7 +834,7 @@ def _build_opportunity_map(
                     confidence=0.3,
                     business_case=BusinessCase(
                         savings_range_annual="$30k–$120k",
-                        assumptions=["Lower confidence; limited direct evidence"],
+                        assumptions=["Template-padded: limited direct evidence for this bottleneck"],
                     ),
                     score_breakdown=ScoreBreakdown(signal_frequency=1.0 / 3.0, source_diversity=1.0 / 3.0, job_role_density=1.0 / 3.0),
                     brief=_build_opportunity_brief(
@@ -557,12 +843,20 @@ def _build_opportunity_map(
                         pain_score=3.0,
                         evidence=ev,
                         industry=industry,
+                        support_level="weak",
                     ),
+                    support_level="weak",
+                    signal_age_days_avg=None,
+                    unique_sources_count=0,
+                    is_padded=True,
+                    trend_key=_make_trend_key(p, pad_cat, is_padded=True),
+                    recommendation="deprioritize",
+                    opportunity_type=_classify_opportunity_type(pad_cat),
                 )
             )
         idx += 1
 
-    # Ensure at least 5 opportunities with generic fallbacks
+    # Ensure at least 5 opportunities with generic fallbacks (always padded)
     fallback_problems = [f"Market dynamics in {city}", f"{industry} operational challenges", "Regional demand and supply", "Cost and efficiency pressures", "Regulatory and compliance"]
     for fp in fallback_problems:
         if len(opportunities) >= 5:
@@ -592,7 +886,7 @@ def _build_opportunity_map(
                 confidence=0.25,
                 business_case=BusinessCase(
                     savings_range_annual="$30k–$100k",
-                    assumptions=["Limited direct evidence; industry template"],
+                    assumptions=["Template-padded: limited direct evidence; industry template only"],
                 ),
                 score_breakdown=ScoreBreakdown(signal_frequency=1.0 / 3.0, source_diversity=1.0 / 3.0, job_role_density=1.0 / 3.0),
                 brief=_build_opportunity_brief(
@@ -601,7 +895,15 @@ def _build_opportunity_map(
                     pain_score=2.5,
                     evidence=ev_fb,
                     industry=industry,
+                    support_level="weak",
                 ),
+                support_level="weak",
+                signal_age_days_avg=None,
+                unique_sources_count=0,
+                is_padded=True,
+                trend_key=_make_trend_key(fp, fb_cat, is_padded=True),
+                recommendation="deprioritize",
+                opportunity_type=_classify_opportunity_type(fb_cat),
             )
         )
 
@@ -635,7 +937,7 @@ def generate_mock_strategy(
     signals_used = _compute_signals_used(headlines, jobs)
     data_quality = _compute_data_quality(headlines, jobs, signals_used)
     opportunity_map = _build_opportunity_map(
-        headlines, jobs, industry, city, template, data_quality, deterministic=deterministic
+        headlines, jobs, industry, city, template, deterministic=deterministic
     )
     return StrategyOutput(
         strategy_version=STRATEGY_VERSION,

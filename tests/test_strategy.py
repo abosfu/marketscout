@@ -364,6 +364,7 @@ def test_brief_why_now_strong_evidence() -> None:
         title="Test", ai_category="Cost reduction", pain_score=7.0,
         evidence=evidence, industry="Manufacturing",
     )
+    # why_now should cite the evidence count
     assert "4" in brief.why_now
 
 

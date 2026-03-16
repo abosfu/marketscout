@@ -84,6 +84,57 @@ class OpportunityItem(BaseModel):
         default=None,
         description="Actionable decision brief: buyer, pain theme, commercial angle, next step, why now",
     )
+    # ── Signal quality fields ───────────────────────────────────────────────
+    support_level: Literal["strong", "moderate", "weak"] = Field(
+        default="moderate",
+        description=(
+            "Signal quality classification: strong = well-evidenced and fresh; "
+            "moderate = partial coverage or moderate recency; "
+            "weak = thin evidence, stale signals, or template-padded"
+        ),
+    )
+    signal_age_days_avg: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        description="Average age of evidence signals in days; None if timestamps unavailable",
+    )
+    unique_sources_count: int = Field(
+        default=0,
+        ge=0,
+        description="Count of unique publishers or companies represented in evidence",
+    )
+    is_padded: bool = Field(
+        default=False,
+        description="True if this opportunity was added via template padding (no direct keyword evidence)",
+    )
+    # ── Identity and actionability fields ──────────────────────────────────
+    trend_key: str = Field(
+        default="",
+        description=(
+            "Stable canonical identifier for cross-run opportunity tracking. "
+            "Format: '{category_slug}::{problem_slug}' for real opportunities; "
+            "'padded::{problem_slug}' for template-padded ones. "
+            "City-agnostic and truncation-proof."
+        ),
+    )
+    recommendation: Literal["pursue_now", "monitor", "validate_further", "deprioritize"] = Field(
+        default="monitor",
+        description=(
+            "Rule-based decision recommendation integrating support_level, confidence, "
+            "pain_score, freshness, and padding. "
+            "pursue_now = act immediately; monitor = watch across runs; "
+            "validate_further = needs more evidence; deprioritize = discard."
+        ),
+    )
+    opportunity_type: Literal["operational", "strategic", "compliance"] = Field(
+        default="operational",
+        description=(
+            "Opportunity classification derived from ai_category. "
+            "operational = day-to-day pain (ops buyer, short cycle); "
+            "strategic = long-horizon initiative (exec buyer); "
+            "compliance = regulatory/legal mandate (legal/finance buyer)."
+        ),
+    )
 
 
 class SignalsUsed(BaseModel):

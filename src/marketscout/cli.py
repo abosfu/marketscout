@@ -331,19 +331,32 @@ def _run_pipeline(
 
     opps = getattr(strategy, "opportunity_map", [])
     if opps:
+        _SUPPORT_STYLE = {"strong": "green", "moderate": "yellow", "weak": "red"}
+        _REC_STYLE = {
+            "pursue_now":       "bold green",
+            "validate_further": "yellow",
+            "monitor":          "white",
+            "deprioritize":     "red dim",
+        }
         opp_table = Table(title="Top 5 opportunities")
-        opp_table.add_column("Title", style="cyan", max_width=40)
+        opp_table.add_column("Title", style="cyan", max_width=35)
         opp_table.add_column("Pain", justify="right")
         opp_table.add_column("ROI", justify="right")
         opp_table.add_column("Conf.", justify="right")
-        opp_table.add_column("Category")
+        opp_table.add_column("Support")
+        opp_table.add_column("Rec.")
         for o in opps[:5]:
+            support = getattr(o, "support_level", "moderate")
+            rec = getattr(o, "recommendation", "monitor")
+            sup_style = _SUPPORT_STYLE.get(support, "white")
+            rec_style = _REC_STYLE.get(rec, "white")
             opp_table.add_row(
-                (getattr(o, "title", "") or "")[:40],
+                (getattr(o, "title", "") or "")[:35],
                 str(getattr(o, "pain_score", 0)),
                 str(getattr(o, "roi_signal", 0)),
                 f"{getattr(o, 'confidence', 0):.2f}",
-                (getattr(o, "ai_category", "") or "")[:20],
+                f"[{sup_style}]{support}[/{sup_style}]",
+                f"[{rec_style}]{rec}[/{rec_style}]",
             )
         console.print(opp_table)
 
@@ -737,49 +750,61 @@ def cmd_compare(city: str, industry: str, limit_runs: int = 3) -> int:
 
     if opp_rows:
         opp_table = Table(title="Aggregated opportunities (across runs)")
-        opp_table.add_column("Title", style="cyan", max_width=45)
+        opp_table.add_column("Title", style="cyan", max_width=40)
         opp_table.add_column("Avg pain", justify="right")
         opp_table.add_column("Avg ROI", justify="right")
         opp_table.add_column("Avg conf.", justify="right")
-        opp_table.add_column("Appearances", justify="right")
+        opp_table.add_column("Seen", justify="right")
+        opp_table.add_column("Padded", justify="right")
+        opp_table.add_column("Strong", justify="right")
         for o in opp_rows:
+            padded_count = o["padded_count"] if "padded_count" in o.keys() else 0
+            strong_count = o["strong_count"] if "strong_count" in o.keys() else 0
+            padded_str = f"[red]{padded_count}[/red]" if padded_count else "[dim]0[/dim]"
+            strong_str = f"[green]{strong_count}[/green]" if strong_count else "[dim]0[/dim]"
             opp_table.add_row(
-                (o["title"] or "")[:45],
+                (o["title"] or "")[:40],
                 f"{o['avg_pain']:.2f}" if o["avg_pain"] is not None else "",
                 f"{o['avg_roi']:.2f}" if o["avg_roi"] is not None else "",
                 f"{o['avg_confidence']:.2f}" if o["avg_confidence"] is not None else "",
                 str(o["appearances"] or 0),
+                padded_str,
+                strong_str,
             )
         console.print(opp_table)
         console.print()
 
     if trend_rows:
         _TREND_LABEL = {
-            "rising":  "[bold green]↑ rising[/bold green]",
-            "stable":  "[white]→ stable[/white]",
-            "falling": "[red]↓ falling[/red]",
-            "single":  "[dim]· single[/dim]",
+            "rising":   "[bold green]↑ rising[/bold green]",
+            "stable":   "[white]→ stable[/white]",
+            "falling":  "[red]↓ falling[/red]",
+            "single":   "[dim]· single[/dim]",
         }
-        _PERSIST_LABEL = {
-            True:  "[bold green]persistent[/bold green]",
-            False: "[yellow]recurring[/yellow]",
+        _QUALITY_LABEL = {
+            "investable": "[bold green]✓ investable[/bold green]",
+            "monitor":    "[yellow]~ monitor[/yellow]",
+            "noise":      "[red dim]✗ noise[/red dim]",
+            "emerging":   "[bold cyan]↗ emerging[/bold cyan]",
+            "declining":  "[red]↓ declining[/red]",
         }
-        trend_table = Table(title="Signal trends")
-        trend_table.add_column("Title", style="cyan", max_width=45)
-        trend_table.add_column("Appearances", justify="right")
+        trend_table = Table(title="Signal trends (quality-aware)")
+        trend_table.add_column("Title", style="cyan", max_width=38)
+        trend_table.add_column("Seen", justify="right")
         trend_table.add_column("Avg pain", justify="right")
         trend_table.add_column("Trend")
-        trend_table.add_column("Strength")
+        trend_table.add_column("Quality")
+        trend_table.add_column("History", max_width=45)
         for t in trend_rows:
-            appearances = t["appearances"]
-            is_persistent = appearances >= limit_runs
-            strength = _PERSIST_LABEL[is_persistent] if appearances > 1 else "[dim]one-time[/dim]"
+            quality = t.get("trend_quality", "monitor")
+            history = t.get("history_summary", "")
             trend_table.add_row(
-                (t["title"] or "")[:45],
-                str(appearances),
+                (t["title"] or "")[:38],
+                str(t["appearances"]),
                 f"{t['avg_pain']:.2f}",
                 _TREND_LABEL.get(t["trend"], t["trend"]),
-                strength,
+                _QUALITY_LABEL.get(quality, quality),
+                history,
             )
         console.print(trend_table)
 
