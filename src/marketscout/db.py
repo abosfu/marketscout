@@ -131,12 +131,22 @@ def init_db(conn: sqlite3.Connection) -> None:
     """)
     conn.commit()
 
-    # Migrate: add status column to opportunities if it came from an older schema.
-    try:
-        conn.execute("ALTER TABLE opportunities ADD COLUMN status TEXT DEFAULT 'discovered'")
-        conn.commit()
-    except sqlite3.OperationalError:
-        pass  # column already exists
+    # Migrate: add columns that may be absent from older schemas.
+    _migrations = [
+        ("opportunities", "status",               "TEXT DEFAULT 'discovered'"),
+        ("opportunities", "support_level",         "TEXT DEFAULT 'moderate'"),
+        ("opportunities", "is_padded",             "INTEGER DEFAULT 0"),
+        ("opportunities", "signal_age_days_avg",   "REAL"),
+        ("opportunities", "unique_sources_count",  "INTEGER DEFAULT 0"),
+        ("opportunities", "trend_key",             "TEXT DEFAULT ''"),
+        ("opportunities", "recommendation",        "TEXT DEFAULT 'monitor'"),
+    ]
+    for table, column, typedef in _migrations:
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {typedef}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
 
 
 # ── Write ─────────────────────────────────────────────────────────────────────
@@ -198,8 +208,10 @@ def save_run(
             """
             INSERT INTO opportunities
                 (run_id, title, problem, ai_category,
-                 pain_score, automation_potential, roi_signal, confidence, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'discovered')
+                 pain_score, automation_potential, roi_signal, confidence, status,
+                 support_level, is_padded, signal_age_days_avg, unique_sources_count,
+                 trend_key, recommendation)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'discovered', ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
@@ -210,6 +222,12 @@ def save_run(
                 opp.automation_potential,
                 opp.roi_signal,
                 opp.confidence,
+                getattr(opp, "support_level", "moderate"),
+                1 if getattr(opp, "is_padded", False) else 0,
+                getattr(opp, "signal_age_days_avg", None),
+                getattr(opp, "unique_sources_count", 0),
+                getattr(opp, "trend_key", ""),
+                getattr(opp, "recommendation", "monitor"),
             ),
         )
 
@@ -390,10 +408,14 @@ def compare_runs(
         f"""
         SELECT
             title,
-            AVG(pain_score)          AS avg_pain,
-            AVG(roi_signal)          AS avg_roi,
-            AVG(confidence)          AS avg_confidence,
-            COUNT(*)                 AS appearances
+            MAX(COALESCE(NULLIF(trend_key, ''), NULL)) AS trend_key,
+            AVG(pain_score)                                             AS avg_pain,
+            AVG(roi_signal)                                             AS avg_roi,
+            AVG(confidence)                                             AS avg_confidence,
+            COUNT(*)                                                    AS appearances,
+            SUM(CASE WHEN is_padded = 1 THEN 1 ELSE 0 END)            AS padded_count,
+            SUM(CASE WHEN support_level = 'strong' THEN 1 ELSE 0 END) AS strong_count,
+            SUM(CASE WHEN support_level = 'weak'   THEN 1 ELSE 0 END) AS weak_count
         FROM opportunities
         WHERE run_id IN ({placeholders})
         GROUP BY title
@@ -404,6 +426,84 @@ def compare_runs(
     return run_rows, cur2.fetchall()
 
 
+def _classify_trend_quality(
+    appearances: int,
+    trend: str,
+    avg_confidence: float,
+    padded_count: int,
+    strong_count: int,
+) -> str:
+    """
+    Classify the actionability of a recurring opportunity based on quality dimensions.
+
+    Returns one of:
+      "investable"  — repeated strong support, rising or stable, confidence >= 0.5
+      "monitor"     — moderate or mixed support; worth watching but not yet actionable
+      "noise"       — majority of appearances are padded or weak; disregard
+      "emerging"    — appeared once this window with strong support; watch closely
+      "declining"   — clear downward pain trend regardless of support level
+
+    Rules (evaluated in order):
+      1. noise     if padded_count >= ceil(appearances / 2)
+      2. declining if trend == "falling"
+      3. emerging  if appearances == 1 and strong_count >= 1
+      4. monitor   if appearances == 1 (single, not strong)
+      5. investable if strong_count >= half of appearances AND avg_confidence >= 0.5
+                     AND trend in (rising, stable)
+      6. monitor   otherwise
+    """
+    # 1. Noise: more than half of appearances are padded
+    if appearances > 0 and padded_count * 2 >= appearances:
+        return "noise"
+    # 2. Declining trend
+    if trend == "falling":
+        return "declining"
+    # 3. Emerging: appeared once this window with strong support
+    if appearances == 1 and strong_count >= 1:
+        return "emerging"
+    # 4. Single appearance, not strongly supported
+    if appearances == 1:
+        return "monitor"
+    # 5. Multi-appearance: investable when strong majority + decent confidence
+    if strong_count * 2 >= appearances and avg_confidence >= 0.5 and trend in ("rising", "stable"):
+        return "investable"
+    # 6. Moderate / mixed
+    return "monitor"
+
+
+def _build_history_summary(
+    appearances: int,
+    limit_runs: int,
+    trend_quality: str,
+    padded_count: int,
+    strong_count: int,
+) -> str:
+    """
+    Return a concise plain-language description of historical persistence.
+    Grounded in actual stored run data — not boilerplate.
+    """
+    if trend_quality == "investable":
+        return (
+            f"appeared in {appearances}/{limit_runs} runs with strong support "
+            f"({strong_count} strong appearance(s))"
+        )
+    if trend_quality == "noise":
+        return (
+            f"appeared {appearances}x but {padded_count} appearance(s) were padded "
+            "— treat as template noise"
+        )
+    if trend_quality == "emerging":
+        return "new strong signal this cycle — not yet repeated; monitor closely"
+    if trend_quality == "declining":
+        return f"appeared {appearances}x but pain score is falling — deprioritise"
+    if appearances > 1:
+        return (
+            f"appeared {appearances}/{limit_runs} runs with mixed or moderate support "
+            f"({strong_count} strong appearance(s))"
+        )
+    return "single appearance this window — insufficient history"
+
+
 def get_trend_data(
     conn: sqlite3.Connection,
     city: str,
@@ -411,14 +511,21 @@ def get_trend_data(
     limit_runs: int = 5,
 ) -> list[dict[str, Any]]:
     """
-    Return trend data for opportunities across the last N runs for city + industry.
+    Return quality-aware trend data for opportunities across the last N runs.
 
     Each entry:
-        title        — opportunity title
-        appearances  — how many of the last N runs it appeared in
-        avg_pain     — average pain_score across those appearances
-        trend        — "rising" | "stable" | "falling" | "single"
-                       Derived by comparing the older-half vs newer-half average pain.
+        title           — opportunity title
+        appearances     — how many of the last N runs it appeared in
+        avg_pain        — average pain_score across those appearances
+        avg_confidence  — average confidence across those appearances
+        trend           — "rising" | "stable" | "falling" | "single"
+                          Derived by comparing older-half vs newer-half average pain.
+        trend_quality   — "investable" | "monitor" | "noise" | "emerging" | "declining"
+                          Quality-aware classification (considers support_level, is_padded).
+        padded_count    — number of appearances where is_padded was True
+        strong_count    — number of appearances where support_level was 'strong'
+        weak_count      — number of appearances where support_level was 'weak'
+        history_summary — plain-language description of historical persistence
 
     Sorted by appearances DESC, avg_pain DESC.
     """
@@ -438,7 +545,8 @@ def get_trend_data(
     placeholders = ",".join("?" * len(run_ids))
     cur2 = conn.execute(
         f"""
-        SELECT o.title, o.pain_score, r.created_at
+        SELECT o.title, o.pain_score, o.confidence,
+               o.support_level, o.is_padded, r.created_at
         FROM opportunities o
         JOIN runs r ON o.run_id = r.run_id
         WHERE o.run_id IN ({placeholders})
@@ -448,15 +556,40 @@ def get_trend_data(
     )
     rows = cur2.fetchall()
 
-    # Group pain scores per title in chronological order
-    title_pains: dict[str, list[float]] = defaultdict(list)
+    # Accumulate per-title data in chronological order
+    title_data: dict[str, dict[str, Any]] = {}
     for r in rows:
-        title_pains[r["title"]].append(r["pain_score"])
+        title = r["title"]
+        if title not in title_data:
+            title_data[title] = {
+                "pains": [],
+                "confidences": [],
+                "padded_count": 0,
+                "strong_count": 0,
+                "weak_count": 0,
+            }
+        title_data[title]["pains"].append(r["pain_score"] or 0.0)
+        title_data[title]["confidences"].append(r["confidence"] or 0.0)
+        if r["is_padded"]:
+            title_data[title]["padded_count"] += 1
+        support = (r["support_level"] or "moderate").lower()
+        if support == "strong":
+            title_data[title]["strong_count"] += 1
+        elif support == "weak":
+            title_data[title]["weak_count"] += 1
 
     result: list[dict[str, Any]] = []
-    for title, pains in title_pains.items():
+    for title, data in title_data.items():
+        pains = data["pains"]
+        confidences = data["confidences"]
         appearances = len(pains)
         avg_pain = sum(pains) / appearances
+        avg_confidence = sum(confidences) / appearances
+        padded_count = data["padded_count"]
+        strong_count = data["strong_count"]
+        weak_count = data["weak_count"]
+
+        # Pain direction: compare older half vs newer half
         if appearances <= 1:
             trend = "single"
         else:
@@ -470,11 +603,33 @@ def get_trend_data(
                 trend = "falling"
             else:
                 trend = "stable"
+
+        trend_quality = _classify_trend_quality(
+            appearances=appearances,
+            trend=trend,
+            avg_confidence=avg_confidence,
+            padded_count=padded_count,
+            strong_count=strong_count,
+        )
+        history_summary = _build_history_summary(
+            appearances=appearances,
+            limit_runs=limit_runs,
+            trend_quality=trend_quality,
+            padded_count=padded_count,
+            strong_count=strong_count,
+        )
+
         result.append({
             "title": title,
             "appearances": appearances,
             "avg_pain": round(avg_pain, 2),
+            "avg_confidence": round(avg_confidence, 3),
             "trend": trend,
+            "trend_quality": trend_quality,
+            "padded_count": padded_count,
+            "strong_count": strong_count,
+            "weak_count": weak_count,
+            "history_summary": history_summary,
         })
 
     result.sort(key=lambda x: (-x["appearances"], -x["avg_pain"]))

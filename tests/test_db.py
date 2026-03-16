@@ -13,6 +13,7 @@ import pytest
 
 from marketscout.db import (
     VALID_STATUSES,
+    _classify_trend_quality,
     compare_runs,
     generate_run_id,
     get_connection,
@@ -38,8 +39,13 @@ def _make_strategy(
     pain: float = 7.0,
     city: str = "Vancouver",
     industry: str = "Construction",
+    support_level: str = "moderate",
+    is_padded: bool = False,
+    signal_age_days_avg: float | None = None,
+    unique_sources_count: int = 2,
+    confidence: float = 0.8,
 ):
-    """Build a minimal StrategyOutput-compatible mock."""
+    """Build a minimal StrategyOutput-compatible mock with all signal quality fields."""
     opp = SimpleNamespace(
         title="Test Opp",
         problem="Test problem",
@@ -47,7 +53,13 @@ def _make_strategy(
         pain_score=pain,
         automation_potential=6.0,
         roi_signal=5.0,
-        confidence=0.8,
+        confidence=confidence,
+        support_level=support_level,
+        is_padded=is_padded,
+        signal_age_days_avg=signal_age_days_avg,
+        unique_sources_count=unique_sources_count,
+        trend_key="operational_efficiency::test_problem",
+        recommendation="monitor",
     )
     dq = SimpleNamespace(coverage_score=0.75, freshness_window_days=7, source_mix_score=0.6)
     su = SimpleNamespace(headlines_count=2, jobs_count=3)
@@ -385,7 +397,6 @@ def test_get_trend_data_single_run(tmp_path):
 def test_get_trend_data_trend_direction(tmp_path):
     """Opportunity appearing twice with rising pain is classified as 'rising'."""
     conn = _tmp_conn(tmp_path)
-    strategy = _make_strategy(pain=4.0)
     for run_id, ts, pain in [
         ("td-rising-a", "2024-01-01T00:00:00Z", 4.0),
         ("td-rising-b", "2024-06-01T00:00:00Z", 8.5),
@@ -400,6 +411,10 @@ def test_get_trend_data_trend_direction(tmp_path):
     result = get_trend_data(conn, "Vancouver", "Construction", limit_runs=5)
     assert len(result) == 1
     assert result[0]["trend"] == "rising"
+    # New quality fields must be present
+    assert "avg_confidence" in result[0]
+    assert "trend_quality" in result[0]
+    assert "history_summary" in result[0]
     conn.close()
 
 

@@ -87,29 +87,51 @@ def strategy_to_markdown(
             sections.append("**Top bottleneck tags:** " + ", ".join(top_tags[:5]) + "\n")
         sections.append("")
 
-    # Opportunity Map table (title, pain, ROI signal, confidence, category)
+    # Opportunity Map table (title, pain, ROI signal, confidence, support level, recommendation, type)
     opps = getattr(strategy, "opportunity_map", [])
     sections.append("# Opportunity Map\n")
     if opps:
-        sections.append("| Title | Pain | ROI signal | Confidence | Category |")
-        sections.append("|-------|------|------------|------------|----------|")
+        sections.append("| Title | Pain | ROI | Conf | Support | Recommendation | Type |")
+        sections.append("|-------|------|-----|------|---------|----------------|------|")
         for o in opps:
-            title = (getattr(o, "title", "") or "")[:45]
-            if len(getattr(o, "title", "") or "") > 45:
-                title += "..."
+            raw_title = getattr(o, "title", "") or ""
+            title = raw_title[:40] + ("..." if len(raw_title) > 40 else "")
             pain = getattr(o, "pain_score", 0)
             roi = getattr(o, "roi_signal", 0)
             conf = getattr(o, "confidence", 0)
-            cat = getattr(o, "ai_category", "")
-            sections.append(f"| {title} | {pain} | {roi} | {conf:.2f} | {cat} |")
+            support = getattr(o, "support_level", "moderate")
+            recommendation = getattr(o, "recommendation", "monitor")
+            opp_type = getattr(o, "opportunity_type", "operational")
+            padded = getattr(o, "is_padded", False)
+            padded_mark = " ⚠" if padded else ""
+            sections.append(f"| {title}{padded_mark} | {pain} | {roi} | {conf:.2f} | {support} | {recommendation} | {opp_type} |")
         sections.append("")
+        sections.append("_⚠ = template-padded opportunity (limited direct evidence)_\n")
     else:
         sections.append("*No opportunities.*\n")
 
-    # Each opportunity detail (problem, evidence, business case)
+    # Each opportunity detail (problem, signal quality, evidence, business case)
     for i, o in enumerate(opps, 1):
         title = getattr(o, "title", "") or f"Opportunity {i}"
         sections.append(f"## {i}. {title}\n")
+
+        # Signal quality and identity header
+        support = getattr(o, "support_level", "moderate")
+        age_avg = getattr(o, "signal_age_days_avg", None)
+        unique_src = getattr(o, "unique_sources_count", 0)
+        is_padded = getattr(o, "is_padded", False)
+        recommendation = getattr(o, "recommendation", "monitor")
+        opp_type = getattr(o, "opportunity_type", "operational")
+        trend_key = getattr(o, "trend_key", "") or ""
+        age_str = f"{age_avg:.0f}d avg age" if age_avg is not None else "age unknown"
+        sections.append(f"**Signal quality:** `{support.upper()}` | {age_str} | {unique_src} unique source(s)\n")
+        sections.append(f"**Decision:** `{recommendation}` | type: `{opp_type}`" + (f" | key: `{trend_key}`" if trend_key else "") + "\n")
+        if is_padded:
+            sections.append(
+                "> **Template-padded** — no direct keyword evidence found for this bottleneck. "
+                "Treat as hypothesis only; do not act without additional validation.\n"
+            )
+
         sections.append(f"**Problem:** {getattr(o, 'problem', '')}\n")
         evidence_list = getattr(o, "evidence", []) or []
         if evidence_list:
