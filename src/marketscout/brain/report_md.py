@@ -161,6 +161,21 @@ def strategy_to_markdown(
             sections.append(f"- **Commercial angle:** {getattr(br, 'commercial_angle', '')}")
             sections.append(f"- **Suggested next step:** {getattr(br, 'suggested_next_step', '')}")
             sections.append(f"- **Why now:** {getattr(br, 'why_now', '')}\n")
+        actions = getattr(o, "suggested_actions", []) or []
+        if actions:
+            sections.append("**Suggested actions:**\n")
+            for act in actions:
+                sections.append(f"- {act}")
+            sections.append("")
+        opp_leads = getattr(o, "leads", []) or []
+        if opp_leads:
+            sections.append("**Potential leads:**\n")
+            for lead in opp_leads:
+                company = getattr(lead, "company_name", "")
+                reason = getattr(lead, "reason", "")
+                sig_type = getattr(lead, "signal_type", "")
+                sections.append(f"- **{company}** — {reason} (signal: {sig_type})")
+            sections.append("")
         sections.append("")
 
     # Leads section summary

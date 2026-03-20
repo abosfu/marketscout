@@ -60,6 +60,22 @@ class OpportunityBrief(BaseModel):
     why_now: str = Field(..., description="Evidence-based urgency signal for this opportunity")
 
 
+class Lead(BaseModel):
+    """A company identified as a potential sales target for a specific opportunity."""
+
+    company_name: str = Field(..., description="Company or organisation name")
+    reason: str = Field(..., description="Why this company is relevant to the opportunity")
+    signal_type: Literal["job", "news"] = Field(
+        ..., description="Type of signal that identified this company"
+    )
+    signal_reference: str = Field(
+        ..., description="Short title or snippet from the source signal (≤80 chars)"
+    )
+    priority_score: float = Field(
+        ..., ge=0.0, le=10.0, description="Heuristic relevance score 0–10"
+    )
+
+
 class OpportunityItem(BaseModel):
     """One opportunity with proof metrics, business case, and explainable score breakdown."""
 
@@ -133,6 +149,22 @@ class OpportunityItem(BaseModel):
             "operational = day-to-day pain (ops buyer, short cycle); "
             "strategic = long-horizon initiative (exec buyer); "
             "compliance = regulatory/legal mandate (legal/finance buyer)."
+        ),
+    )
+    suggested_actions: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Ordered list of 1–3 specific, actionable next steps. "
+            "Derived from recommendation, opportunity_type, support_level, and problem text. "
+            "Rule-based and deterministic — no LLM required."
+        ),
+    )
+    leads: list[Lead] = Field(
+        default_factory=list,
+        description=(
+            "Top 3–5 companies identified as potential sales targets for this opportunity. "
+            "Extracted from job and news signals via keyword matching. "
+            "Ranked by signal strength (job > news) and frequency."
         ),
     )
 

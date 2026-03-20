@@ -15,6 +15,7 @@ from marketscout.brain.schema import (
     BusinessCase,
     DataQuality,
     EvidenceItem,
+    Lead,
     OpportunityBrief,
     OpportunityItem,
     ScoreBreakdown,
@@ -72,6 +73,15 @@ _COMMERCIAL_MAP: dict[str, str] = {
     "Growth and scale": "Capacity-building platforms, staffing tools, or strategic consulting",
     "Partnership and M&A": "Deal sourcing, due-diligence tooling, or partnership advisory",
 }
+
+# Corporate suffix regex for extracting company names from news headlines.
+# Matches patterns like "Acme Corp", "Pacific Coast Construction Inc.", "BuildRight Group".
+_CORP_SUFFIX_RE = re.compile(
+    r"\b([A-Z][a-zA-Z&'.\-]*(?:\s+[A-Z][a-zA-Z&'.\-]*){0,3})"
+    r"\s+(?:Inc|Corp|Ltd|LLC|Group|Co|Company|Services|Solutions|Systems|"
+    r"Technologies|Tech|Consulting|Holdings|Partners|Associates|"
+    r"Construction|Contracting|Staffing|Logistics|Industries|Enterprises)\.?",
+)
 
 # Opportunity type derived from AI category
 _OPPORTUNITY_TYPE_MAP: dict[str, str] = {
@@ -158,6 +168,178 @@ def _classify_opportunity_type(ai_category: str) -> str:
     return _OPPORTUNITY_TYPE_MAP.get(ai_category, "operational")
 
 
+def _build_suggested_actions(
+    problem: str,
+    opportunity_type: str,
+    recommendation: str,
+    support_level: str,
+    trend_key: str = "",
+) -> list[str]:
+    """
+    Return 1–3 specific, actionable next steps grounded in recommendation, type, and support.
+
+    Pure function — deterministic, no LLM. Reuses problem text for specificity.
+    """
+    _STOP = {"and", "or", "the", "a", "an", "in", "of", "for", "to", "with", "by", "from"}
+    words = [w for w in re.sub(r"[^a-z0-9 ]+", " ", problem.lower()).split() if w not in _STOP]
+    short_label = " ".join(words[:4]) if words else problem[:35].lower()
+
+    if recommendation == "deprioritize":
+        return ["Do not invest resources yet — signal quality is insufficient to justify action"]
+
+    if recommendation == "pursue_now":
+        if opportunity_type == "strategic":
+            return [
+                f"Map the competitive landscape for '{short_label}' — identify who is solving this and where the gap is",
+                "Engage 3–5 senior buyers (VP/Director level) via warm intro or targeted LinkedIn outreach",
+                "Draft a one-pager on your differentiated angle; share with a trusted contact for feedback this week",
+            ]
+        if opportunity_type == "compliance":
+            return [
+                f"Confirm enforcement timeline and scope with a regulatory specialist for '{short_label}'",
+                "Identify affected companies by searching for compliance/legal role postings in this space",
+                "Build a compliance checklist or advisory brief and test it with 5 affected companies",
+            ]
+        # operational (default)
+        return [
+            "Pull top companies from leads.csv — job signal confirms active budget and hiring mandate",
+            f"Build a targeted pilot offer for '{short_label}' and test with direct outbound this week",
+            "Book 3 discovery calls this sprint; validate the pain point in the first 15 minutes",
+        ]
+
+    if recommendation == "validate_further":
+        return [
+            "Interview 3–5 operators in this space to confirm the problem exists at scale",
+            f"Search job boards for roles related to '{short_label}' and check 60-day posting volume trend",
+            "Re-run this analysis in 2 weeks; commit resources only if signal count and diversity increase",
+        ]
+
+    # monitor (default)
+    kw = trend_key.split("::")[-1].replace("_", " ") if trend_key else short_label
+    return [
+        f"Set a weekly news alert for: '{kw}'",
+        "Track job posting volume in this area; re-evaluate if postings increase 30%+ month-over-month",
+    ]
+
+
+def _extract_company_from_headline(title: str) -> str | None:
+    """Extract a company name from a news headline using corporate suffix patterns."""
+    m = _CORP_SUFFIX_RE.search(title)
+    return m.group(0).strip() if m else None
+
+
+def _build_leads_for_opportunity(
+    problem: str,
+    keywords: set[str],
+    headlines: list[dict[str, Any]],
+    jobs: list[dict[str, Any]],
+    evidence: list[EvidenceItem],
+) -> list[Lead]:
+    """
+    Identify top 3–5 companies relevant to this opportunity from existing signals.
+
+    Matches jobs and headlines against opportunity keywords, extracts company names,
+    deduplicates (case-insensitive), and ranks by signal strength + frequency.
+
+    Jobs use the explicit 'company' field; headlines use regex corporate-suffix extraction.
+    Jobs score 2.0 base (hiring = active budget intent); news scores 1.0 base.
+    +1.0 bonus if the signal appears directly in the opportunity's evidence.
+    +0.5 frequency bonus per additional signal from the same company.
+
+    Pure function — deterministic, no ML, no external calls.
+    """
+    _STOP = {
+        "and", "or", "the", "a", "an", "in", "of", "for", "to", "with",
+        "by", "from", "at", "on", "is", "are", "was", "were",
+    }
+
+    # Build search terms: explicit bucket keywords (most reliable), or problem words as fallback
+    if keywords:
+        search_terms = {kw.lower() for kw in keywords}
+    else:
+        # Padded/fallback opportunities: derive terms from problem text
+        search_terms = {
+            w for w in re.sub(r"[^a-z0-9 ]+", " ", problem.lower()).split()
+            if w not in _STOP and len(w) >= 4
+        }
+
+    if not search_terms:
+        return []
+
+    evidence_links: set[str] = {e.link for e in evidence if e.link and e.link != "#"}
+
+    # company_key (lowercase) → candidate dict
+    candidates: dict[str, dict] = {}
+
+    def _upsert(company: str, base_score: float, reason: str, sig_type: str, sig_ref: str) -> None:
+        cname = company.strip()
+        key = cname.lower()
+        if len(key) < 2:
+            return
+        if key in candidates:
+            candidates[key]["priority_score"] = min(10.0, candidates[key]["priority_score"] + 0.5)
+        else:
+            candidates[key] = {
+                "company_name": cname,
+                "reason": reason,
+                "signal_type": sig_type,
+                "signal_reference": sig_ref[:80],
+                "priority_score": min(10.0, base_score),
+            }
+
+    for j in jobs:
+        company = (j.get("company") or "").strip()
+        if not company:
+            continue
+        jtitle = (j.get("title") or "").lower()
+        jlink = (j.get("link") or "#").strip()
+        if not any(term in jtitle for term in search_terms):
+            continue
+        score = 2.0 + (1.0 if jlink in evidence_links else 0.0)
+        _upsert(
+            company,
+            score,
+            f"Hiring for '{(j.get('title') or 'role')[:50]}'",
+            "job",
+            (j.get("title") or "")[:80],
+        )
+
+    for h in headlines:
+        htitle = (h.get("title") or "").strip()
+        hlink = (h.get("link") or "#").strip()
+        if not any(term in htitle.lower() for term in search_terms):
+            continue
+        company = _extract_company_from_headline(htitle)
+        if not company:
+            continue
+        score = 1.0 + (1.0 if hlink in evidence_links else 0.0)
+        _upsert(
+            company,
+            score,
+            f"Mentioned in '{htitle[:50]}'",
+            "news",
+            htitle[:80],
+        )
+
+    if not candidates:
+        return []
+
+    sorted_entries = sorted(
+        candidates.values(),
+        key=lambda x: (-x["priority_score"], x["company_name"].lower()),
+    )
+    return [
+        Lead(
+            company_name=e["company_name"],
+            reason=e["reason"],
+            signal_type=e["signal_type"],
+            signal_reference=e["signal_reference"],
+            priority_score=round(e["priority_score"], 2),
+        )
+        for e in sorted_entries[:5]
+    ]
+
+
 def _build_problem_specific_commercial_angle(problem: str, ai_category: str) -> str:
     """
     Return a commercial angle grounded in the actual bottleneck problem,
@@ -194,11 +376,13 @@ def _build_opportunity_brief(
     avg_age_days: float | None = None,
     unique_sources_count: int = 0,
     support_level: str = "moderate",
+    recommendation: str = "monitor",
 ) -> OpportunityBrief:
     """
     Derive a structured, deterministic decision brief from scoring and evidence.
     No LLM required — all fields come from template mappings and evidence metadata.
-    avg_age_days and unique_sources_count ground the why_now field in actual signal data.
+    avg_age_days, unique_sources_count, support_level, and recommendation ground the
+    why_now field in actual signal quality data.
     """
     # Likely buyer: start from industry default, then refine from job titles in evidence
     buyer = _BUYER_MAP.get(industry, "Operations Manager / Decision-Maker")
@@ -240,7 +424,7 @@ def _build_opportunity_brief(
     else:
         next_step = "Watch signal over next 2–3 runs; low confidence — validate before pursuing"
 
-    # why_now: grounded in actual evidence age and source diversity, not just count
+    # why_now: analyst note leading with support verdict, grounded in evidence metadata
     n_ev = len(evidence)
     has_both = any(e.source == "headline" for e in evidence) and any(e.source == "job" for e in evidence)
 
@@ -257,28 +441,43 @@ def _build_opportunity_brief(
 
     source_clause = f"{unique_sources_count} unique sources" if unique_sources_count > 1 else ""
 
-    if n_ev >= 4 and has_both:
-        parts = [f"{n_ev} cross-type signals (news + jobs)"]
-        if source_clause:
-            parts.append(source_clause)
-        if freshness_clause:
-            parts.append(freshness_clause)
-        why_now = "; ".join(parts)
-    elif n_ev >= 3:
-        parts = [f"{n_ev} signals confirm the problem this cycle"]
-        if freshness_clause:
-            parts.append(freshness_clause)
-        why_now = "; ".join(parts) + " — cross-source coverage partial"
-    elif n_ev >= 2:
-        base = "Signal present but narrow"
-        if freshness_clause:
-            base += f"; {freshness_clause}"
-        why_now = base + " — confirm with additional run before treating as primary thesis"
+    # Lead phrase: support-level verdict first, evidence detail second
+    if support_level == "strong":
+        lead = f"Multi-source evidence confirms a real gap: {n_ev} signal{'s' if n_ev != 1 else ''} across news + jobs"
+    elif support_level == "weak":
+        lead = f"Thin evidence ({n_ev} signal{'s' if n_ev != 1 else ''}) — treat as early indicator only"
     else:
-        why_now = "Weak or single-source signal; use as early indicator only — not yet investable"
+        # moderate — evidence-count based
+        if n_ev >= 4 and has_both:
+            lead = f"{n_ev} cross-type signals (news + jobs)"
+        elif n_ev >= 3:
+            lead = f"{n_ev} signals confirm the problem this cycle"
+        elif n_ev >= 2:
+            lead = "Signal present but narrow"
+        else:
+            lead = "Single-source signal; use as early indicator only"
 
+    parts = [lead]
+    if source_clause:
+        parts.append(source_clause)
+    if freshness_clause:
+        parts.append(freshness_clause)
+    why_now = "; ".join(parts)
+
+    # Trailing context for moderate partial-coverage cases
+    if support_level == "moderate":
+        if n_ev >= 3 and not (n_ev >= 4 and has_both):
+            why_now += " — cross-source coverage partial"
+        elif n_ev < 3:
+            why_now += " — confirm with additional run before treating as primary thesis"
+
+    # Quality alert for weak multi-evidence
     if support_level == "weak" and n_ev > 1:
         why_now += " [low-confidence: verify before acting]"
+
+    # Urgency addendum for strong pursue_now signals
+    if support_level == "strong" and recommendation == "pursue_now":
+        why_now += " — act now, quality thresholds met"
 
     return OpportunityBrief(
         likely_buyer=buyer,
@@ -609,6 +808,9 @@ def _build_opportunity_map(
     for kw, bn in keyword_to_bottleneck.items():
         bottleneck_to_keywords.setdefault(bn, set()).add(kw)
 
+    # Forward map: problem label → keywords that actually appeared in signals (for lead extraction)
+    problem_to_keywords: dict[str, set[str]] = {}
+
     # Build per-signal metadata lookups (link → published timestamp, link → source name)
     link_to_published: dict[str, str] = {}
     link_to_source_name: dict[str, str] = {}
@@ -649,6 +851,7 @@ def _build_opportunity_map(
                 if link not in bucket_link_sets[key] and len(bucket[key]) < 5:
                     bucket[key].append(EvidenceItem(title=title, link=link, source="headline"))
                     bucket_link_sets[key].add(link)
+                problem_to_keywords.setdefault(problem, set()).add(kw)
                 # No break — allow a signal to match multiple bottlenecks
 
     for j in jobs:
@@ -666,6 +869,7 @@ def _build_opportunity_map(
                 if link not in bucket_link_sets[key] and len(bucket[key]) < 5:
                     bucket[key].append(EvidenceItem(title=title, link=link, source="job"))
                     bucket_link_sets[key].add(link)
+                problem_to_keywords.setdefault(problem, set()).add(kw)
                 # No break — allow a signal to match multiple bottlenecks
 
     # Build OpportunityItem for each bucket with transparent per-opportunity scoring.
@@ -736,6 +940,10 @@ def _build_opportunity_map(
 
         ai_cat = _bottleneck_to_ai_category(problem, template)
         title_short = problem[:50] + ("..." if len(problem) > 50 else "")
+        # Compute identity/decision fields first so brief and actions can use them
+        opp_trend_key = _make_trend_key(problem, ai_cat, is_padded=False)
+        opp_recommendation = _classify_recommendation(support_level, confidence, pain_score, False, avg_age_days)
+        opp_type = _classify_opportunity_type(ai_cat)
         brief = _build_opportunity_brief(
             title=title_short,
             ai_category=ai_cat,
@@ -745,10 +953,22 @@ def _build_opportunity_map(
             avg_age_days=avg_age_days,
             unique_sources_count=unique_sources_count,
             support_level=support_level,
+            recommendation=opp_recommendation,
         )
-        opp_trend_key = _make_trend_key(problem, ai_cat, is_padded=False)
-        opp_recommendation = _classify_recommendation(support_level, confidence, pain_score, False, avg_age_days)
-        opp_type = _classify_opportunity_type(ai_cat)
+        actions = _build_suggested_actions(
+            problem=problem,
+            opportunity_type=opp_type,
+            recommendation=opp_recommendation,
+            support_level=support_level,
+            trend_key=opp_trend_key,
+        )
+        opp_leads = _build_leads_for_opportunity(
+            problem=problem,
+            keywords=problem_to_keywords.get(problem, set()),
+            headlines=headlines,
+            jobs=jobs,
+            evidence=evidence_list,
+        )
         opportunities.append(
             OpportunityItem(
                 title=title_short,
@@ -775,6 +995,8 @@ def _build_opportunity_map(
                 trend_key=opp_trend_key,
                 recommendation=opp_recommendation,
                 opportunity_type=opp_type,
+                suggested_actions=actions,
+                leads=opp_leads,
             )
         )
 
@@ -852,6 +1074,19 @@ def _build_opportunity_map(
                     trend_key=_make_trend_key(p, pad_cat, is_padded=True),
                     recommendation="deprioritize",
                     opportunity_type=_classify_opportunity_type(pad_cat),
+                    suggested_actions=_build_suggested_actions(
+                        problem=p,
+                        opportunity_type=_classify_opportunity_type(pad_cat),
+                        recommendation="deprioritize",
+                        support_level="weak",
+                    ),
+                    leads=_build_leads_for_opportunity(
+                        problem=p,
+                        keywords=set(),
+                        headlines=headlines,
+                        jobs=jobs,
+                        evidence=ev,
+                    ),
                 )
             )
         idx += 1
@@ -904,6 +1139,19 @@ def _build_opportunity_map(
                 trend_key=_make_trend_key(fp, fb_cat, is_padded=True),
                 recommendation="deprioritize",
                 opportunity_type=_classify_opportunity_type(fb_cat),
+                suggested_actions=_build_suggested_actions(
+                    problem=fp,
+                    opportunity_type=_classify_opportunity_type(fb_cat),
+                    recommendation="deprioritize",
+                    support_level="weak",
+                ),
+                leads=_build_leads_for_opportunity(
+                    problem=fp,
+                    keywords=set(),
+                    headlines=headlines,
+                    jobs=jobs,
+                    evidence=ev_fb,
+                ),
             )
         )
 

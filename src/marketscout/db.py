@@ -14,6 +14,7 @@ DB file location (in order of precedence):
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import uuid
@@ -140,6 +141,8 @@ def init_db(conn: sqlite3.Connection) -> None:
         ("opportunities", "unique_sources_count",  "INTEGER DEFAULT 0"),
         ("opportunities", "trend_key",             "TEXT DEFAULT ''"),
         ("opportunities", "recommendation",        "TEXT DEFAULT 'monitor'"),
+        ("opportunities", "suggested_actions",     "TEXT DEFAULT '[]'"),
+        ("opportunities", "leads",                 "TEXT DEFAULT '[]'"),
     ]
     for table, column, typedef in _migrations:
         try:
@@ -210,8 +213,8 @@ def save_run(
                 (run_id, title, problem, ai_category,
                  pain_score, automation_potential, roi_signal, confidence, status,
                  support_level, is_padded, signal_age_days_avg, unique_sources_count,
-                 trend_key, recommendation)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'discovered', ?, ?, ?, ?, ?, ?)
+                 trend_key, recommendation, suggested_actions, leads)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'discovered', ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 run_id,
@@ -228,6 +231,11 @@ def save_run(
                 getattr(opp, "unique_sources_count", 0),
                 getattr(opp, "trend_key", ""),
                 getattr(opp, "recommendation", "monitor"),
+                json.dumps(getattr(opp, "suggested_actions", []) or []),
+                json.dumps([
+                    ld.model_dump() if hasattr(ld, "model_dump") else dict(ld)
+                    for ld in (getattr(opp, "leads", []) or [])
+                ]),
             ),
         )
 

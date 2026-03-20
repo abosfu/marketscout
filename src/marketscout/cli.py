@@ -359,6 +359,35 @@ def _run_pipeline(
                 f"[{rec_style}]{rec}[/{rec_style}]",
             )
         console.print(opp_table)
+        console.print()
+        for o in opps[:5]:
+            rec = getattr(o, "recommendation", "monitor")
+            actions = getattr(o, "suggested_actions", []) or []
+            if not actions:
+                continue
+            title_short = (getattr(o, "title", "") or "")[:35]
+            rec_style = _REC_STYLE.get(rec, "white")
+            first_action = actions[0][:72]
+            console.print(
+                f"  [dim]→[/dim] [cyan]{title_short}[/cyan]: "
+                f"[{rec_style}]{rec}[/{rec_style}] — {first_action}"
+            )
+        # Top companies to target (from per-opportunity leads)
+        lead_lines = []
+        for o in opps[:5]:
+            opp_leads = getattr(o, "leads", []) or []
+            if not opp_leads:
+                continue
+            title_short = (getattr(o, "title", "") or "")[:30]
+            companies = ", ".join(
+                getattr(ld, "company_name", "") for ld in opp_leads[:3]
+            )
+            lead_lines.append(f"   [dim]-[/dim] [cyan]{title_short}[/cyan]: {companies}")
+        if lead_lines:
+            console.print()
+            console.print("[bold]→ Top companies to target:[/bold]")
+            for line in lead_lines:
+                console.print(line)
 
     console.print("\n[green]Outputs:[/green]")
     for p in [input_signals_path, strategy_path, signal_analysis_path, report_md_path, report_html_path, summary_path]:
