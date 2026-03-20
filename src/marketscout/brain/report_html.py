@@ -172,7 +172,8 @@ def strategy_to_html(
         )
         key_frag = f" &nbsp;|&nbsp; key: <code>{_escape(trend_key)}</code>" if trend_key else ""
         parts.append(
-            f"<p><strong>Decision:</strong> "
+            f"<p style='background:#f0f4ff;padding:0.35rem 0.6rem;border-left:3px solid {rec_color};margin:0.4rem 0'>"
+            f"<strong>Decision:</strong> "
             f"<span style='color:{rec_color};font-weight:bold'>{_escape(recommendation)}</span>"
             f" &nbsp;|&nbsp; type: <code>{_escape(opp_type)}</code>{key_frag}</p>"
         )
@@ -223,6 +224,25 @@ def strategy_to_html(
             ]:
                 parts.append(f"<tr><td style='white-space:nowrap;font-weight:bold'>{label}</td><td>{_escape(val)}</td></tr>")
             parts.append("</tbody></table>")
+        actions = getattr(o, "suggested_actions", []) or []
+        if actions:
+            parts.append("<p><strong>Suggested actions:</strong></p><ul>")
+            for act in actions:
+                parts.append(f"<li>{_escape(act)}</li>")
+            parts.append("</ul>")
+        opp_leads = getattr(o, "leads", []) or []
+        if opp_leads:
+            parts.append("<p><strong>Potential leads:</strong></p><ul>")
+            for lead in opp_leads:
+                company = _escape(getattr(lead, "company_name", ""))
+                reason = _escape(getattr(lead, "reason", ""))
+                sig_type = _escape(getattr(lead, "signal_type", ""))
+                score = getattr(lead, "priority_score", 0)
+                parts.append(
+                    f"<li><strong>{company}</strong> — {reason} "
+                    f"<span style='color:#666'>(signal: {sig_type}, score: {score:.1f})</span></li>"
+                )
+            parts.append("</ul>")
 
     parts.append("<h2>Leads</h2>")
     parts.append("<p>See <strong>leads.csv</strong> for company-level leads (top companies by readiness).</p>")
