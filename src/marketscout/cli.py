@@ -297,6 +297,20 @@ def _run_pipeline(
     except Exception:
         pass  # DB errors are silently swallowed so artifacts are always delivered
 
+    # BI export: generate star-schema CSVs for Power BI / Tableau (non-fatal)
+    bi_export_dir: Path | None = None
+    try:
+        from marketscout.bi_export import export_to_bi
+        from marketscout.db import get_db_path
+        bi_export_dir = out_dir / "bi_exports"
+        export_to_bi(
+            db_path=str(get_db_path()),
+            export_dir=str(bi_export_dir),
+            run_id=run_id,
+        )
+    except Exception:
+        bi_export_dir = None  # BI export failures never break the main pipeline
+
     # Rich terminal output
     console.print(f"\n[bold]MarketScout v{__version__}[/bold]\n")
 
@@ -394,6 +408,8 @@ def _run_pipeline(
         console.print(f"  {p}")
     if write_leads:
         console.print(f"  {leads_path}")
+    if bi_export_dir is not None:
+        console.print(f"\n[green]→ BI Export generated:[/green] {bi_export_dir}/")
     console.print()
     return 0
 
