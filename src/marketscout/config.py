@@ -1,10 +1,22 @@
-"""Configuration layer: defaults for city, headlines, cache TTL, strategy mode, and disk cache."""
+"""Configuration layer: defaults for city, headlines, cache TTL, strategy mode, and disk cache.
+
+`load_dotenv()` is called once at import time so that a `.env` file at the project root
+is transparently picked up by every os.environ / os.getenv call in the application.
+Variables already present in the environment always take precedence (override=False).
+"""
 
 from __future__ import annotations
 
 import os
 from pathlib import Path
 from typing import Literal
+
+from dotenv import load_dotenv
+
+# Load .env from the project root (two levels up from this file: src/marketscout/ → root).
+# Safe to call repeatedly — dotenv is idempotent and never overwrites real env vars.
+_ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
+load_dotenv(dotenv_path=_ENV_FILE, override=False)
 
 StrategyMode = Literal["mock", "llm", "auto"]
 
@@ -16,6 +28,7 @@ DEFAULT_STRATEGY_MODE: StrategyMode = "auto"
 
 
 def _env_int(key: str, default: int) -> int:
+    """Read an integer from the environment; silently fall back to default on missing or invalid value."""
     try:
         val = os.environ.get(key)
         return int(val) if val is not None else default
@@ -24,6 +37,7 @@ def _env_int(key: str, default: int) -> int:
 
 
 def _env_mode(key: str, default: StrategyMode) -> StrategyMode:
+    """Read a StrategyMode literal from the environment; return default for unrecognised values."""
     val = (os.environ.get(key) or "").strip().lower()
     if val in ("mock", "llm", "auto"):
         return val  # type: ignore[return-value]
@@ -56,3 +70,11 @@ def get_cache_dir() -> Path:
     if val and val.strip():
         return Path(val.strip())
     return Path.cwd() / ".cache" / "marketscout"
+
+
+def get_db_path() -> Path:
+    """Path to the MarketScout SQLite database. Override with MARKETSCOUT_DB_PATH."""
+    val = os.environ.get("MARKETSCOUT_DB_PATH")
+    if val and val.strip():
+        return Path(val.strip())
+    return get_cache_dir() / "marketscout.db"

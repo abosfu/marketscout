@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from marketscout.normalize import SUPPORTED_INDUSTRIES, normalize_city, normalize_industry
+import marketscout.scout.headlines as _ms_headlines
+import marketscout.scout.providers.rss as _ms_rss
 from marketscout.templates.industries import get_template
 
 
@@ -176,8 +178,8 @@ def test_cli_run_normalizes_city_and_industry(
         text = _RSS
         def raise_for_status(self): pass
 
-    monkeypatch.setattr("marketscout.scout.headlines.requests.get", lambda *a, **k: _FakeResp())
-    monkeypatch.setattr("marketscout.scout.providers.rss.requests.get", lambda *a, **k: _FakeResp())
+    monkeypatch.setattr(_ms_headlines.requests, "get", lambda *a, **k: _FakeResp())
+    monkeypatch.setattr(_ms_rss.requests, "get", lambda *a, **k: _FakeResp())
 
     from marketscout.cli import cmd_run
 

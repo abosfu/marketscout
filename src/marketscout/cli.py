@@ -53,6 +53,7 @@ def _validate_and_normalize(city: str, industry: str) -> tuple[str, str] | None:
 
 
 def _make_fetch_entry(provider: str, status: str, error: str | None = None) -> dict:
+    """Build a fetch-status dict for one signal source (used in signal_analysis.json)."""
     return {"provider": provider, "status": status, "error": error}
 
 
@@ -192,13 +193,15 @@ def _run_pipeline(
     )
     if result is None:
         return 1
-    headlines, jobs, fetch_status = result
+    # Bronze layer: raw signals as fetched from live APIs or disk cache
+    bronze_headlines, bronze_jobs, fetch_status = result
 
-    strategy = generate_strategy(
-        headlines,
+    # Silver layer: normalized, validated strategy output
+    silver_strategy = generate_strategy(
+        bronze_headlines,
         industry=industry,
         city=city,
-        jobs=jobs,
+        jobs=bronze_jobs,
         objective=objective,
         deterministic=deterministic,
     )
@@ -228,34 +231,38 @@ def _run_pipeline(
     summary_path = out_dir / "summary.txt"
     leads_path = out_dir / "leads.csv"
 
-    input_signals_path.write_text(json.dumps({"headlines": headlines, "jobs": jobs}, indent=2), encoding="utf-8")
-    strategy_path.write_text(json.dumps(strategy.to_json_dict(), indent=2), encoding="utf-8")
+    # Gold layer: persist final artifacts to the run directory
+    input_signals_path.write_text(
+        json.dumps({"headlines": bronze_headlines, "jobs": bronze_jobs}, indent=2),
+        encoding="utf-8",
+    )
+    strategy_path.write_text(json.dumps(silver_strategy.to_json_dict(), indent=2), encoding="utf-8")
 
     signal_analysis = build_signal_analysis(
-        headlines, jobs, city, industry,
+        bronze_headlines, bronze_jobs, city, industry,
         run_metadata=run_metadata,
         fetch_status=fetch_status,
         strategy_mode=get_strategy_mode(),
     )
     signal_analysis_path.write_text(json.dumps(signal_analysis, indent=2), encoding="utf-8")
 
-    report_md_path.write_text(strategy_to_markdown(strategy.to_json_dict(), signal_analysis=signal_analysis), encoding="utf-8")
-    report_html_path.write_text(strategy_to_html(strategy.to_json_dict(), signal_analysis=signal_analysis), encoding="utf-8")
+    report_md_path.write_text(strategy_to_markdown(silver_strategy.to_json_dict(), signal_analysis=signal_analysis), encoding="utf-8")
+    report_html_path.write_text(strategy_to_html(silver_strategy.to_json_dict(), signal_analysis=signal_analysis), encoding="utf-8")
 
     # summary.txt
     summary_lines: list[str] = [f"MarketScout — {city} | {industry}"]
     if objective:
         summary_lines.append(f"Objective (label): {objective}")
-    su = getattr(strategy, "signals_used", None)
+    su = getattr(silver_strategy, "signals_used", None)
     if su:
         summary_lines.append(f"Signals — Headlines: {su.headlines_count}, Jobs: {su.jobs_count}")
-    dq = getattr(strategy, "data_quality", None)
+    dq = getattr(silver_strategy, "data_quality", None)
     if dq:
         summary_lines.append(
             f"Data quality — freshness: {dq.freshness_window_days}d, "
             f"coverage: {dq.coverage_score:.2f}, source mix: {dq.source_mix_score:.2f}"
         )
-    opps = getattr(strategy, "opportunity_map", [])
+    opps = getattr(silver_strategy, "opportunity_map", [])
     summary_lines.append(f"Opportunities: {len(opps)}")
     for o in opps[:5]:
         summary_lines.append(
@@ -264,52 +271,14 @@ def _run_pipeline(
         )
     summary_path.write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
 
-    lead_rows: list[dict] | None = None
     if write_leads:
-        leads = build_leads(jobs)
+        leads = build_leads(bronze_jobs)
         lead_rows = [asdict(lead) for lead in leads]
         with leads_path.open("w", encoding="utf-8", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=["company", "job_count", "top_keywords", "readiness_score", "example_links"])
             writer.writeheader()
             for row in lead_rows:
                 writer.writerow(row)
-
-    # Persist run to SQLite (non-fatal — DB failures never break artifact generation)
-    try:
-        from marketscout.db import get_connection, save_run
-        _db_conn = get_connection()
-        try:
-            save_run(
-                conn=_db_conn,
-                run_id=run_id,
-                city=city,
-                industry=industry,
-                strategy=strategy,
-                headlines=headlines,
-                jobs=jobs,
-                fetch_status=fetch_status,
-                run_metadata=run_metadata,
-                strategy_mode=get_strategy_mode(),
-                leads=lead_rows,
-            )
-        finally:
-            _db_conn.close()
-    except Exception:
-        pass  # DB errors are silently swallowed so artifacts are always delivered
-
-    # BI export: generate star-schema CSVs for Power BI / Tableau (non-fatal)
-    bi_export_dir: Path | None = None
-    try:
-        from marketscout.bi_export import export_to_bi
-        from marketscout.db import get_db_path
-        bi_export_dir = out_dir / "bi_exports"
-        export_to_bi(
-            db_path=str(get_db_path()),
-            export_dir=str(bi_export_dir),
-            run_id=run_id,
-        )
-    except Exception:
-        bi_export_dir = None  # BI export failures never break the main pipeline
 
     # Rich terminal output
     console.print(f"\n[bold]MarketScout v{__version__}[/bold]\n")
@@ -343,7 +312,7 @@ def _run_pipeline(
         console.print(dq_table)
         console.print()
 
-    opps = getattr(strategy, "opportunity_map", [])
+    opps = getattr(silver_strategy, "opportunity_map", [])
     if opps:
         _SUPPORT_STYLE = {"strong": "green", "moderate": "yellow", "weak": "red"}
         _REC_STYLE = {
@@ -408,8 +377,6 @@ def _run_pipeline(
         console.print(f"  {p}")
     if write_leads:
         console.print(f"  {leads_path}")
-    if bi_export_dir is not None:
-        console.print(f"\n[green]→ BI Export generated:[/green] {bi_export_dir}/")
     console.print()
     return 0
 
@@ -613,249 +580,6 @@ def _write_eval_report(out_path: Path, results: list[tuple[str, bool, str]], str
     out_path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def cmd_opp_list(
-    status: str | None = None,
-    city: str | None = None,
-    industry: str | None = None,
-    limit: int = 20,
-) -> int:
-    """List stored opportunities with their workflow status."""
-    try:
-        from rich.console import Console
-        from rich.table import Table
-    except ImportError:
-        print(f"MarketScout {__version__} requires 'rich'. Install with: pip install rich", file=sys.stderr)
-        return 1
-
-    try:
-        from marketscout.db import get_connection, list_opportunities
-        conn = get_connection()
-        rows = list_opportunities(conn, city=city, industry=industry, status=status, limit=limit)
-        conn.close()
-    except Exception as e:
-        print(f"Error: could not read opportunities: {e}", file=sys.stderr)
-        return 1
-
-    console = Console()
-    if not rows:
-        console.print("[yellow]No opportunities found.[/yellow]")
-        return 0
-
-    _STATUS_STYLE = {
-        "discovered": "white",
-        "under_review": "yellow",
-        "prioritized": "bold green",
-        "rejected": "red",
-        "pursued": "bold cyan",
-    }
-    table = Table(title="Opportunities")
-    table.add_column("ID", style="dim", justify="right")
-    table.add_column("Title", style="cyan", max_width=40)
-    table.add_column("City")
-    table.add_column("Industry")
-    table.add_column("Pain", justify="right")
-    table.add_column("ROI", justify="right")
-    table.add_column("Status")
-    table.add_column("Run date")
-    for r in rows:
-        st = r["status"] or "discovered"
-        style = _STATUS_STYLE.get(st, "white")
-        table.add_row(
-            str(r["id"]),
-            (r["title"] or "")[:40],
-            r["city"] or "",
-            r["industry"] or "",
-            f"{r['pain_score']:.1f}" if r["pain_score"] is not None else "",
-            f"{r['roi_signal']:.1f}" if r["roi_signal"] is not None else "",
-            f"[{style}]{st}[/{style}]",
-            (r["created_at"] or "")[:10],
-        )
-    console.print(table)
-    return 0
-
-
-def cmd_opp_set(opp_id: int, status: str, note: str | None = None) -> int:
-    """Transition an opportunity's workflow status."""
-    try:
-        from marketscout.db import VALID_STATUSES, get_connection, update_opportunity_status
-        if status not in VALID_STATUSES:
-            print(
-                f"Error: invalid status '{status}'. Valid: {', '.join(VALID_STATUSES)}",
-                file=sys.stderr,
-            )
-            return 1
-        conn = get_connection()
-        found = update_opportunity_status(conn, opp_id, status, note)
-        conn.close()
-    except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
-    if not found:
-        print(f"Error: no opportunity with id {opp_id}.", file=sys.stderr)
-        return 1
-    suffix = f" — {note}" if note else ""
-    print(f"Opportunity {opp_id} → {status}{suffix}")
-    return 0
-
-
-def cmd_history(limit: int = 10) -> int:
-    """Print recent runs as a Rich table. Returns 0 on success, 1 on error."""
-    try:
-        from rich.console import Console
-        from rich.table import Table
-    except ImportError:
-        print(f"MarketScout {__version__} requires 'rich'. Install with: pip install rich", file=sys.stderr)
-        return 1
-
-    try:
-        from marketscout.db import get_connection, list_runs
-        conn = get_connection()
-        rows = list_runs(conn, limit=limit)
-        conn.close()
-    except Exception as e:
-        print(f"Error: could not read run history: {e}", file=sys.stderr)
-        return 1
-
-    console = Console()
-    if not rows:
-        console.print("[yellow]No runs found in database.[/yellow]")
-        return 0
-
-    table = Table(title=f"Run history (last {limit})")
-    table.add_column("Run ID", style="dim", max_width=12)
-    table.add_column("Created at")
-    table.add_column("City", style="cyan")
-    table.add_column("Industry", style="cyan")
-    table.add_column("Mode")
-    table.add_column("Headlines", justify="right")
-    table.add_column("Jobs", justify="right")
-    table.add_column("Coverage", justify="right")
-
-    for r in rows:
-        run_id_short = (r["run_id"] or "")[:8]
-        table.add_row(
-            run_id_short,
-            r["created_at"] or "",
-            r["city"] or "",
-            r["industry"] or "",
-            r["strategy_mode"] or "",
-            str(r["headlines_count"] or 0),
-            str(r["jobs_count"] or 0),
-            f"{r['coverage_score']:.2f}" if r["coverage_score"] is not None else "",
-        )
-
-    console.print(table)
-    return 0
-
-
-def cmd_compare(city: str, industry: str, limit_runs: int = 3) -> int:
-    """
-    Compare the last N runs for a city + industry, aggregating opportunity scores.
-    Returns 0 on success, 1 on error.
-    """
-    try:
-        from rich.console import Console
-        from rich.table import Table
-    except ImportError:
-        print(f"MarketScout {__version__} requires 'rich'. Install with: pip install rich", file=sys.stderr)
-        return 1
-
-    try:
-        from marketscout.db import compare_runs, get_connection, get_trend_data
-        conn = get_connection()
-        run_rows, opp_rows = compare_runs(conn, city=city, industry=industry, limit_runs=limit_runs)
-        trend_rows = get_trend_data(conn, city=city, industry=industry, limit_runs=limit_runs)
-        conn.close()
-    except Exception as e:
-        print(f"Error: could not read comparison data: {e}", file=sys.stderr)
-        return 1
-
-    console = Console()
-
-    if not run_rows:
-        console.print(f"[yellow]No runs found for city='{city}', industry='{industry}'.[/yellow]")
-        return 0
-
-    run_table = Table(title=f"Recent runs — {city} / {industry}")
-    run_table.add_column("Run ID", style="dim", max_width=12)
-    run_table.add_column("Created at")
-    run_table.add_column("Mode")
-    run_table.add_column("Headlines", justify="right")
-    run_table.add_column("Jobs", justify="right")
-    for r in run_rows:
-        run_table.add_row(
-            (r["run_id"] or "")[:8],
-            r["created_at"] or "",
-            r["strategy_mode"] or "",
-            str(r["headlines_count"] or 0),
-            str(r["jobs_count"] or 0),
-        )
-    console.print(run_table)
-    console.print()
-
-    if opp_rows:
-        opp_table = Table(title="Aggregated opportunities (across runs)")
-        opp_table.add_column("Title", style="cyan", max_width=40)
-        opp_table.add_column("Avg pain", justify="right")
-        opp_table.add_column("Avg ROI", justify="right")
-        opp_table.add_column("Avg conf.", justify="right")
-        opp_table.add_column("Seen", justify="right")
-        opp_table.add_column("Padded", justify="right")
-        opp_table.add_column("Strong", justify="right")
-        for o in opp_rows:
-            padded_count = o["padded_count"] if "padded_count" in o.keys() else 0
-            strong_count = o["strong_count"] if "strong_count" in o.keys() else 0
-            padded_str = f"[red]{padded_count}[/red]" if padded_count else "[dim]0[/dim]"
-            strong_str = f"[green]{strong_count}[/green]" if strong_count else "[dim]0[/dim]"
-            opp_table.add_row(
-                (o["title"] or "")[:40],
-                f"{o['avg_pain']:.2f}" if o["avg_pain"] is not None else "",
-                f"{o['avg_roi']:.2f}" if o["avg_roi"] is not None else "",
-                f"{o['avg_confidence']:.2f}" if o["avg_confidence"] is not None else "",
-                str(o["appearances"] or 0),
-                padded_str,
-                strong_str,
-            )
-        console.print(opp_table)
-        console.print()
-
-    if trend_rows:
-        _TREND_LABEL = {
-            "rising":   "[bold green]↑ rising[/bold green]",
-            "stable":   "[white]→ stable[/white]",
-            "falling":  "[red]↓ falling[/red]",
-            "single":   "[dim]· single[/dim]",
-        }
-        _QUALITY_LABEL = {
-            "investable": "[bold green]✓ investable[/bold green]",
-            "monitor":    "[yellow]~ monitor[/yellow]",
-            "noise":      "[red dim]✗ noise[/red dim]",
-            "emerging":   "[bold cyan]↗ emerging[/bold cyan]",
-            "declining":  "[red]↓ declining[/red]",
-        }
-        trend_table = Table(title="Signal trends (quality-aware)")
-        trend_table.add_column("Title", style="cyan", max_width=38)
-        trend_table.add_column("Seen", justify="right")
-        trend_table.add_column("Avg pain", justify="right")
-        trend_table.add_column("Trend")
-        trend_table.add_column("Quality")
-        trend_table.add_column("History", max_width=45)
-        for t in trend_rows:
-            quality = t.get("trend_quality", "monitor")
-            history = t.get("history_summary", "")
-            trend_table.add_row(
-                (t["title"] or "")[:38],
-                str(t["appearances"]),
-                f"{t['avg_pain']:.2f}",
-                _TREND_LABEL.get(t["trend"], t["trend"]),
-                _QUALITY_LABEL.get(quality, quality),
-                history,
-            )
-        console.print(trend_table)
-
-    return 0
-
-
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="marketscout",
@@ -866,7 +590,7 @@ def main() -> int:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    subparsers = parser.add_subparsers(dest="command", required=False)
+    subparsers = parser.add_subparsers(dest="command", required=True, metavar="COMMAND")
 
     # ── run ───────────────────────────────────────────────────────────────────
     p_run = subparsers.add_parser(
@@ -1031,127 +755,8 @@ def main() -> int:
     )
     p_eval.set_defaults(func=lambda ns: cmd_eval(ns.signals, ns.strategy, ns.out))
 
-    # ── opp ───────────────────────────────────────────────────────────────────
-    p_opp = subparsers.add_parser(
-        "opp",
-        help="Manage individual opportunities (list, update workflow status).",
-        description="View and manage stored opportunities and their decision workflow status.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    opp_subs = p_opp.add_subparsers(dest="opp_command", required=True)
-
-    # opp list
-    p_opp_list = opp_subs.add_parser(
-        "list",
-        help="List stored opportunities with workflow status.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    p_opp_list.add_argument("--status", type=str, default=None,
-        metavar="STATUS",
-        help=f"Filter by status. One of: {', '.join(['discovered', 'under_review', 'prioritized', 'rejected', 'pursued'])}.")
-    p_opp_list.add_argument("--city", type=str, default=None, metavar="CITY",
-        help="Filter by city.")
-    p_opp_list.add_argument("--industry", type=str, default=None, metavar="INDUSTRY",
-        help="Filter by industry.")
-    p_opp_list.add_argument("--limit", type=int, default=20, metavar="N",
-        help="Maximum number of opportunities to show (default: 20).")
-    p_opp_list.set_defaults(
-        func=lambda ns: cmd_opp_list(ns.status, ns.city, ns.industry, ns.limit)
-    )
-
-    # opp set
-    p_opp_set = opp_subs.add_parser(
-        "set",
-        help="Update the workflow status of an opportunity.",
-        description=(
-            "Transition an opportunity's status.\n"
-            "Valid statuses: discovered → under_review → prioritized → pursued\n"
-            "                                            ↘ rejected"
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    p_opp_set.add_argument("opp_id", type=int, metavar="ID",
-        help="Opportunity ID (from 'opp list').")
-    p_opp_set.add_argument("--status", type=str, required=True,
-        choices=["discovered", "under_review", "prioritized", "rejected", "pursued"],
-        help="New workflow status.")
-    p_opp_set.add_argument("--note", type=str, default=None, metavar="TEXT",
-        help="Optional annotation stored in the workflow audit log.")
-    p_opp_set.set_defaults(
-        func=lambda ns: cmd_opp_set(ns.opp_id, ns.status, ns.note)
-    )
-
-    # ── history ───────────────────────────────────────────────────────────────
-    p_history = subparsers.add_parser(
-        "history",
-        help="Show recent runs stored in the SQLite database.",
-        description="Print a table of the most recent MarketScout runs from the local database.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    p_history.add_argument(
-        "--limit",
-        type=int,
-        default=10,
-        metavar="N",
-        help="Number of recent runs to show (default: 10).",
-    )
-    p_history.set_defaults(func=lambda ns: cmd_history(ns.limit))
-
-    # ── compare ───────────────────────────────────────────────────────────────
-    p_compare = subparsers.add_parser(
-        "compare",
-        help="Compare the last N runs for a city + industry, aggregating opportunity scores.",
-        description=(
-            "Show the most recent runs for a city/industry pair and aggregate\n"
-            "opportunity scores across them to surface consistently high-scoring opportunities."
-        ),
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    p_compare.add_argument(
-        "--city",
-        type=str,
-        required=True,
-        metavar="CITY",
-        help="Target city to compare runs for.",
-    )
-    p_compare.add_argument(
-        "--industry",
-        type=str,
-        required=True,
-        metavar="INDUSTRY",
-        help="Target industry to compare runs for.",
-    )
-    p_compare.add_argument(
-        "--limit-runs",
-        type=int,
-        default=3,
-        metavar="N",
-        help="Number of most recent runs to aggregate (default: 3).",
-    )
-    p_compare.set_defaults(func=lambda ns: cmd_compare(ns.city, ns.industry, ns.limit_runs))
-
-    # ── menu ──────────────────────────────────────────────────────────────────
-    p_menu = subparsers.add_parser(
-        "menu",
-        help="Launch interactive mode (guided terminal menu).",
-        description="Start the interactive menu. Equivalent to running marketscout with no arguments.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    p_menu.set_defaults(func=lambda ns: _launch_interactive())
-
     args = parser.parse_args()
-
-    # No subcommand given — launch interactive mode
-    if not hasattr(args, "func"):
-        return _launch_interactive()
-
     return args.func(args)
-
-
-def _launch_interactive() -> int:
-    """Lazy import and launch of interactive mode (avoids circular import at module level)."""
-    from marketscout.interactive import run_menu
-    return run_menu()
 
 
 if __name__ == "__main__":
