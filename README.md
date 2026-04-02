@@ -298,7 +298,7 @@ marketscout/
 
 ---
 
-## Interview talking points
+## Talking points
 
 - **Medallion architecture in Python.** Bronze (raw API bytes) → Silver (normalised, deduplicated, Pydantic-validated) → Gold (SQLite star schema). The same pattern used in Databricks/dbt, but self-contained and runnable locally in one command.
 - **Why a read-only AI layer matters.** Giving an LLM write access to a database is a critical security failure. The SQLite `?mode=ro` URI flag and keyword guard make it structurally impossible for the AI to mutate data — not just a best-effort check.
