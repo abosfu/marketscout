@@ -11,6 +11,8 @@ import pytest
 from marketscout.cli import BUNDLE_REQUIRED, cmd_bundle, cmd_eval, cmd_run
 from marketscout.fs import find_latest_run_dir
 from marketscout.scout import ScoutError
+import marketscout.scout.headlines as _ms_headlines
+import marketscout.scout.providers.rss as _ms_rss
 
 
 # ── Shared mock helpers ───────────────────────────────────────────────────────
@@ -117,8 +119,8 @@ def _signals_with_links(links: list) -> dict:
 
 def test_run_creates_all_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """run writes all expected artifacts; spot-checks strategy.json and report content."""
-    monkeypatch.setattr("marketscout.scout.headlines.requests.get", _ok)
-    monkeypatch.setattr("marketscout.scout.providers.rss.requests.get", _ok)
+    monkeypatch.setattr(_ms_headlines.requests, "get", _ok)
+    monkeypatch.setattr(_ms_rss.requests, "get", _ok)
 
     out_dir = tmp_path / "out"
     code = cmd_run(
@@ -151,8 +153,8 @@ def test_run_creates_all_artifacts(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
 def test_fetch_status_live_when_both_succeed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Both fetches succeed → status 'live'; run_metadata fields are well-formed."""
-    monkeypatch.setattr("marketscout.scout.headlines.requests.get", _ok)
-    monkeypatch.setattr("marketscout.scout.providers.rss.requests.get", _ok)
+    monkeypatch.setattr(_ms_headlines.requests, "get", _ok)
+    monkeypatch.setattr(_ms_rss.requests, "get", _ok)
 
     code, sa = _make_run(tmp_path, monkeypatch, deterministic=True)
     assert code == 0
@@ -181,7 +183,7 @@ def test_fetch_status_cached_when_headlines_fail(tmp_path: Path, monkeypatch: py
     write_cached(cache_dir, key, "headlines.json",
                  [{"title": "Cached", "link": "https://cache.com", "source": "s"}])
 
-    monkeypatch.setattr("marketscout.scout.providers.rss.requests.get", _ok)
+    monkeypatch.setattr(_ms_rss.requests, "get", _ok)
     monkeypatch.setattr("marketscout.scout.fetch_headlines", _raise("network down"))
 
     code, sa = _make_run(tmp_path, monkeypatch)
@@ -205,7 +207,7 @@ def test_fetch_status_cached_when_jobs_fail(tmp_path: Path, monkeypatch: pytest.
     write_cached(cache_dir, key, "jobs.json",
                  [{"title": "Cached job", "company": "Acme", "link": "https://j.com", "published": "", "source": "s"}])
 
-    monkeypatch.setattr("marketscout.scout.headlines.requests.get", _ok)
+    monkeypatch.setattr(_ms_headlines.requests, "get", _ok)
     monkeypatch.setattr("marketscout.scout.fetch_jobs", _raise("api unavailable"))
 
     code, sa = _make_run(tmp_path, monkeypatch)

@@ -11,9 +11,10 @@ DEFAULT_JOBS_LIMIT = 10
 
 
 def _normalize_job(item: dict[str, Any]) -> dict[str, str]:
-    """Normalize a job item to title, company, location, link, published, source.
+    """Normalize a raw job dict to the canonical JobItem shape.
 
-    Kept for backward compatibility and tests; providers already emit this normalized shape.
+    Ensures all six fields (title, company, location, link, published, source)
+    are present as stripped strings, with ``link`` defaulting to ``"#"`` when absent.
     """
     return {
         "title": (item.get("title") or "").strip(),
@@ -39,7 +40,7 @@ def fetch_jobs(
         city: Target city (used for provider queries).
         industry: Target industry / keyword.
         limit: Max number of jobs to return.
-        provider: Which provider to use: \"adzuna\" (default) or \"rss\".
+        provider: Which provider to use: "adzuna" (default) or "rss".
         allow_fallback: If True and the primary provider fails, fall back to RSS provider.
 
     Raises:
@@ -59,7 +60,6 @@ def fetch_jobs(
             "Supported providers are: 'adzuna', 'rss'."
         )
 
-    # Primary: Adzuna
     primary_error: Exception | None = None
     try:
         adzuna = AdzunaProvider()
@@ -67,14 +67,11 @@ def fetch_jobs(
     except ScoutError as e:
         primary_error = e
 
-    # Optional fallback to RSS if allowed
     if allow_fallback:
         try:
             rss = RssJobsProvider()
             return rss.fetch_jobs(city=city, industry=industry, limit=limit)
         except ScoutError:
-            # Fall through to raise the original Adzuna error to keep it actionable
             pass
 
     raise ScoutError(str(primary_error) if primary_error is not None else "Jobs provider failed.")
-

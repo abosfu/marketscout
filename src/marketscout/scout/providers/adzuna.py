@@ -1,4 +1,10 @@
-"""Adzuna jobs provider: real job listings via Adzuna Jobs API."""
+"""Adzuna jobs provider: real job listings via Adzuna Jobs API.
+
+There is NO local-file or sample-data fallback here.
+If the API call fails for any reason, a ScoutError is raised immediately so the
+caller (fetch_jobs / CLI) can decide whether to use the disk cache or abort.
+Keys are loaded from the environment via config.load_dotenv() and os.environ.
+"""
 
 from __future__ import annotations
 
@@ -29,9 +35,18 @@ class AdzunaProvider(JobsProvider):
         app_key: str | None = None,
         country: str | None = None,
     ) -> None:
+        """Initialise provider from explicit values or environment variables.
+
+        Args:
+            app_id: Adzuna App ID. Falls back to ``ADZUNA_APP_ID`` env var.
+            app_key: Adzuna App Key. Falls back to ``ADZUNA_APP_KEY`` env var.
+            country: ISO 3166-1 alpha-2 country code (e.g. ``"ca"``). Falls back to ``ADZUNA_COUNTRY`` env var, then ``"ca"``.
+
+        Raises:
+            ScoutError: If ``app_id`` or ``app_key`` cannot be resolved.
+        """
         self.app_id = (app_id or _get_env("ADZUNA_APP_ID")).strip()
         self.app_key = (app_key or _get_env("ADZUNA_APP_KEY")).strip()
-        # Default to Canada (ca) if not provided
         self.country = (country or _get_env("ADZUNA_COUNTRY") or "ca").lower()
 
         if not self.app_id or not self.app_key:
@@ -50,7 +65,6 @@ class AdzunaProvider(JobsProvider):
         """
         city = (city or "").strip()
         industry = (industry or "").strip()
-        # Adzuna search endpoint: /v1/api/jobs/{country}/search/{page}
         url = f"{ADZUNA_BASE_URL}/{self.country}/search/1"
         params: dict[str, Any] = {
             "app_id": self.app_id,
@@ -69,7 +83,6 @@ class AdzunaProvider(JobsProvider):
         except requests.RequestException as e:
             raise ScoutError(f"Adzuna jobs request failed: {e}") from e
         except ValueError as e:
-            # JSON decode error
             raise ScoutError(f"Adzuna jobs response was not valid JSON: {e}") from e
 
         results = data.get("results") or []
@@ -92,4 +105,3 @@ class AdzunaProvider(JobsProvider):
             }
             jobs.append(job)
         return jobs
-

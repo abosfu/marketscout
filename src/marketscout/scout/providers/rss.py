@@ -82,4 +82,3 @@ class RssJobsProvider(JobsProvider):
             f"Failed to fetch jobs via RSS after {RETRIES + 1} attempts. "
             f"Check network and URL. Error: {last_err}"
         ) from last_err
-

@@ -10,8 +10,11 @@ import pytest
 
 from marketscout.scout import ScoutError
 from marketscout.scout.headlines import _parse_rss_items, fetch_headlines
+import marketscout.scout.headlines as _ms_headlines
 from marketscout.scout.jobs import _normalize_job, fetch_jobs
 from marketscout.scout.providers.adzuna import AdzunaProvider
+import marketscout.scout.providers.adzuna as _ms_adzuna
+import marketscout.scout.providers.rss as _ms_rss
 
 
 # ── Headlines ─────────────────────────────────────────────────────────────────
@@ -70,7 +73,7 @@ def test_fetch_headlines_returns_list(monkeypatch: pytest.MonkeyPatch) -> None:
         text = rss
         def raise_for_status(self): pass
 
-    monkeypatch.setattr("marketscout.scout.headlines.requests.get", lambda *a, **k: FakeResponse())
+    monkeypatch.setattr(_ms_headlines.requests, "get", lambda *a, **k: FakeResponse())
     result = fetch_headlines(limit=3)
     assert isinstance(result, list) and len(result) >= 1
     for item in result:
@@ -130,7 +133,7 @@ def test_fetch_jobs_returns_list_when_mocked(monkeypatch: pytest.MonkeyPatch) ->
         text = rss
         def raise_for_status(self) -> None: pass
 
-    monkeypatch.setattr("marketscout.scout.providers.rss.requests.get", lambda *a, **k: FakeResponse())
+    monkeypatch.setattr(_ms_rss.requests, "get", lambda *a, **k: FakeResponse())
     result = fetch_jobs(city="Vancouver", industry="Construction", limit=5, provider="rss")
     assert isinstance(result, list)
     for item in result:
@@ -162,7 +165,7 @@ def test_adzuna_provider_parses_results(monkeypatch: pytest.MonkeyPatch) -> None
                 "created": "2025-02-24T10:00:00Z",
             }]}
 
-    monkeypatch.setattr("marketscout.scout.providers.adzuna.requests.get", lambda *a, **k: FakeResp())
+    monkeypatch.setattr(_ms_adzuna.requests, "get", lambda *a, **k: FakeResp())
     provider = AdzunaProvider(app_id="test-id", app_key="test-key", country="ca")
     jobs = provider.fetch_jobs(city="Vancouver", industry="Construction", limit=5)
     assert isinstance(jobs, list) and len(jobs) == 1

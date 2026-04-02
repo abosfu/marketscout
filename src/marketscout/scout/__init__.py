@@ -1,4 +1,4 @@
-"""Scout module: fetch headlines and job signals (live only; no sample fallback at runtime)."""
+"""Scout: fetch headlines and job signals."""
 
 from marketscout.scout.errors import ScoutError
 from marketscout.scout.headlines import fetch_headlines

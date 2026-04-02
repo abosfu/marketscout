@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-# All sample data lives here — never under data/ which is runtime-empty.
+# All sample data for tests lives here.
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 

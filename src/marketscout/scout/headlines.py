@@ -5,7 +5,6 @@ from __future__ import annotations
 import time
 import urllib.parse
 import xml.etree.ElementTree as ET
-from typing import NoReturn
 
 import requests
 
@@ -123,6 +122,3 @@ def fetch_headlines(
         f"Check network and URL: {url}. Error: {last_err}"
     ) from last_err
 
-
-# Legacy default URL for backward compatibility
-VANCOUVER_BUSINESS_RSS = build_rss_url(city="Vancouver", industry="business")

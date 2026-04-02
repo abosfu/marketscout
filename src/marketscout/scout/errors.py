@@ -1,6 +1,4 @@
-"""Scout module errors: single source for ScoutError."""
-
-from __future__ import annotations
+"""Scout fetch/parse errors."""
 
 
 class ScoutError(Exception):
