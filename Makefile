@@ -1,15 +1,19 @@
-# MarketScout — Zero-Friction Strategy Engine (CLI)
-# Run from repo root: make run | make test | make clean
+# MarketScout — run from repo root after: pip install -e .
 
 PYTHON ?= python
 
-run:
-	PYTHONPATH=src $(PYTHON) -m marketscout run --city Vancouver --industry Construction
+backend:
+	uvicorn marketscout.backend.main:app --reload --port 8000
+
+frontend:
+	streamlit run src/marketscout/frontend/app.py
+
+run: backend
 
 test:
-	PYTHONPATH=src $(PYTHON) -m pytest tests/ -v
+	$(PYTHON) -m pytest tests/ -q
 
 clean:
 	rm -rf out/ .cache/ .pytest_cache/
 
-.PHONY: run test clean
+.PHONY: backend frontend run test clean
