@@ -1,8 +1,0 @@
-"""Brain module — compatibility shim. Implementation lives in marketscout.backend.ai / marketscout.backend.schema."""
-
-from marketscout.backend.ai.report_html import strategy_to_html
-from marketscout.backend.ai.report_md import strategy_to_markdown
-from marketscout.backend.schema import OpportunityBrief, StrategyOutput
-from marketscout.backend.ai.strategy import generate_strategy
-
-__all__ = ["OpportunityBrief", "StrategyOutput", "generate_strategy", "strategy_to_markdown", "strategy_to_html"]

@@ -1,8 +1,13 @@
-"""Filesystem helpers: latest run directory for bundle default."""
+"""Filesystem helpers: project root resolution and run directory utilities."""
 
 from __future__ import annotations
 
 from pathlib import Path
+
+
+def project_root() -> Path:
+    """Return the absolute path of the project root directory (two levels above src/marketscout/)."""
+    return Path(__file__).resolve().parents[2]
 
 
 def find_latest_run_dir(base_out_dir: str | Path = "out") -> Path | None:

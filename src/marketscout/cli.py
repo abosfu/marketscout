@@ -158,9 +158,10 @@ def _run_pipeline(
         return 1
     city, industry = validated
 
-    from marketscout.brain import generate_strategy, strategy_to_html, strategy_to_markdown
-    from marketscout.brain.strategy import build_signal_analysis
-    from marketscout.config import get_cache_dir, get_disk_cache_ttl_seconds, get_strategy_mode
+    from marketscout.backend.ai import generate_strategy, strategy_to_html, strategy_to_markdown
+    from marketscout.backend.ai.strategy import build_signal_analysis
+    from marketscout.config import get_cache_dir, get_db_path, get_disk_cache_ttl_seconds, get_strategy_mode
+    from marketscout.db import init_db, write_gold
     from marketscout.leads import build_leads
 
     try:
@@ -270,6 +271,18 @@ def _run_pipeline(
             f"(pain={getattr(o, 'pain_score', 0)}, roi={getattr(o, 'roi_signal', 0)})"
         )
     summary_path.write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
+
+    # Gold layer: persist run to SQLite star schema
+    _db_path = get_db_path()
+    init_db(_db_path)
+    write_gold(
+        run_id,
+        city,
+        industry,
+        silver_strategy.opportunity_map,
+        bronze_headlines + bronze_jobs,
+        db_path=_db_path,
+    )
 
     if write_leads:
         leads = build_leads(bronze_jobs)
@@ -470,7 +483,7 @@ def cmd_eval(signals_path: Path, strategy_path: Path, out_path: Path | None) -> 
     Quality gate: validate v2.0 strategy and evidence links; write eval_report.md.
     Exit 0 if all checks pass, 1 otherwise.
     """
-    from marketscout.brain.schema import StrategyOutput
+    from marketscout.backend.schema import StrategyOutput
 
     if out_path is None:
         out_path = strategy_path.parent / "eval_report.md"
