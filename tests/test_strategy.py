@@ -9,9 +9,9 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from marketscout.brain.report_html import strategy_to_html
-from marketscout.brain.report_md import strategy_to_markdown
-from marketscout.brain.schema import (
+from marketscout.backend.ai.report_html import strategy_to_html
+from marketscout.backend.ai.report_md import strategy_to_markdown
+from marketscout.backend.schema import (
     AI_CATEGORIES,
     BusinessCase,
     DataQuality,
@@ -22,7 +22,7 @@ from marketscout.brain.schema import (
     StrategyOutput,
     get_json_schema,
 )
-from marketscout.brain.strategy import _build_opportunity_brief, generate_mock_strategy, generate_strategy
+from marketscout.backend.ai.strategy import _build_opportunity_brief, generate_mock_strategy, generate_strategy
 from marketscout.leads import LeadRow, build_leads
 
 
@@ -427,7 +427,7 @@ def test_html_report_includes_brief() -> None:
         [{"title": "Labor shortage in construction", "link": "https://ex.com/h1", "published": ""}],
         "Construction", "Vancouver",
     )
-    from marketscout.brain.report_html import strategy_to_html
+    from marketscout.backend.ai.report_html import strategy_to_html
     html = strategy_to_html(strategy)
     assert "Likely buyer" in html
     assert "Why now" in html
