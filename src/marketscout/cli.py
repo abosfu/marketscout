@@ -642,9 +642,12 @@ def main() -> int:
     p_run.add_argument(
         "--jobs-provider",
         type=str,
-        default="adzuna",
-        choices=["adzuna", "rss"],
-        help="Jobs data source: 'adzuna' (default) or 'rss'.",
+        default="auto",
+        choices=["auto", "serpapi", "adzuna", "rss"],
+        help=(
+            "Jobs data source: 'auto' (SerpAPI if SERPAPI_KEY, else Adzuna, else RSS), "
+            "'serpapi', 'adzuna', or 'rss'."
+        ),
     )
     p_run.add_argument(
         "--jobs-limit",
@@ -686,7 +689,10 @@ def main() -> int:
     p_run.add_argument(
         "--allow-provider-fallback",
         action="store_true",
-        help="Fall back to the RSS jobs provider if the primary provider (Adzuna) fails.",
+        help=(
+            "With --jobs-provider=adzuna: fall back to RSS if Adzuna fails. "
+            "(Ignored for --jobs-provider=auto, which already ends with RSS.)"
+        ),
     )
     p_run.add_argument(
         "--write-leads",

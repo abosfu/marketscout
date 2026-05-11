@@ -51,8 +51,9 @@ def test_generate_mock_strategy_returns_v2_schema() -> None:
         assert len(o.evidence) >= 1
         sb = getattr(o, "score_breakdown", None)
         if sb is not None:
-            total = sb.signal_frequency + sb.source_diversity + sb.job_role_density
-            assert abs(total - 1.0) < 1e-6, f"score_breakdown should sum to 1.0, got {total}"
+            assert 0.0 <= sb.signal_frequency <= 1.0, "signal_frequency out of range"
+            assert 0.0 <= sb.source_diversity <= 1.0, "source_diversity out of range"
+            assert 0.0 <= sb.job_role_density <= 1.0, "job_role_density out of range"
 
 
 def test_generate_mock_strategy_works_with_empty_headlines() -> None:
@@ -95,8 +96,8 @@ def test_evidence_links_from_inputs_only() -> None:
             assert e.title
 
 
-def test_score_breakdown_exists_and_sums_to_one() -> None:
-    """Every opportunity has score_breakdown; components sum to 1.0."""
+def test_score_breakdown_exists_and_is_independent() -> None:
+    """Every opportunity has score_breakdown; each component is an independent metric in [0.0, 1.0]."""
     headlines = [
         {"title": "Labor shortage", "link": "https://a.com", "source": "A"},
         {"title": "Rate hike", "link": "https://b.com", "source": "B"},
@@ -106,8 +107,9 @@ def test_score_breakdown_exists_and_sums_to_one() -> None:
     for o in strategy.opportunity_map:
         assert o.score_breakdown is not None
         sb = o.score_breakdown
-        total = sb.signal_frequency + sb.source_diversity + sb.job_role_density
-        assert abs(total - 1.0) < 1e-6, f"score_breakdown sum {total} != 1.0"
+        assert 0.0 <= sb.signal_frequency <= 1.0, f"signal_frequency {sb.signal_frequency} out of range"
+        assert 0.0 <= sb.source_diversity <= 1.0, f"source_diversity {sb.source_diversity} out of range"
+        assert 0.0 <= sb.job_role_density <= 1.0, f"job_role_density {sb.job_role_density} out of range"
 
 
 def test_deterministic_mode_produces_identical_outputs() -> None:

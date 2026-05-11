@@ -8,6 +8,13 @@ import pytest
 FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures"
 
 
+@pytest.fixture(autouse=True)
+def _unset_optional_scout_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep headline/job tests on mocked RSS paths when developer keys are loaded."""
+    monkeypatch.delenv("NEWSAPI_KEY", raising=False)
+    monkeypatch.delenv("SERPAPI_KEY", raising=False)
+
+
 @pytest.fixture
 def repo_root() -> Path:
     """Repository root (parent of tests/)."""

@@ -910,16 +910,15 @@ def _build_opportunity_map(
         weighted = _W_FREQ * raw_freq + _W_DIV * raw_div_n + _W_JOB * raw_job
         pain_score = min(10.0, round(2.0 + 8.0 * weighted, 1))
 
-        # score_breakdown: proportional contribution of each weighted component (sums to 1.0)
-        if weighted > 0.0:
-            sf = round((_W_FREQ * raw_freq) / weighted, 3)
-            sd = round((_W_DIV * raw_div_n) / weighted, 3)
-            jr = round(max(0.0, 1.0 - sf - sd), 3)
-        else:
-            sf = round(1.0 / 3.0, 3)
-            sd = round(1.0 / 3.0, 3)
-            jr = round(max(0.0, 1.0 - sf - sd), 3)
-        sb = ScoreBreakdown(signal_frequency=sf, source_diversity=sd, job_role_density=jr)
+        # score_breakdown: independent metrics (0.0–1.0 each; do NOT sum to 1.0).
+        # signal_frequency: fraction of all input signals that matched this opportunity.
+        # source_diversity: 1.0 if both job listings and news headlines are present; 0.5 if only one type.
+        # job_role_density: fraction of this opportunity's matching signals that are job postings.
+        _total_signals = len(headlines) + len(jobs)
+        sb_sf = round(min(1.0, n_evidence / _total_signals) if _total_signals > 0 else 0.0, 3)
+        sb_sd = round(1.0 if (has_headline and has_job) else (0.5 if (has_headline or has_job) else 0.0), 3)
+        sb_jr = round(n_job_evidence / n_evidence if n_evidence > 0 else 0.0, 3)
+        sb = ScoreBreakdown(signal_frequency=sb_sf, source_diversity=sb_sd, job_role_density=sb_jr)
 
         # Per-opportunity roi_signal: use only job items that appear in this opportunity's evidence
         job_ev_links = {e.link for e in evidence_list if e.source == "job"}
@@ -1044,6 +1043,17 @@ def _build_opportunity_map(
                 ev = [EvidenceItem(title=f"{industry} context", link="#", source="headline")]
             pad_title = p[:50] + ("..." if len(p) > 50 else "")
             pad_cat = _bottleneck_to_ai_category(p, template)
+            # Padded opportunity: no direct keyword match, so signal_frequency is 0.
+            # source_diversity and job_role_density are derived from the borrowed evidence.
+            _pad_n = len(ev)
+            _pad_n_jobs = sum(1 for e in ev if e.source == "job")
+            _pad_has_h = any(e.source == "headline" for e in ev)
+            _pad_has_j = _pad_n_jobs > 0
+            _pad_sb = ScoreBreakdown(
+                signal_frequency=0.0,
+                source_diversity=round(1.0 if (_pad_has_h and _pad_has_j) else (0.5 if (_pad_has_h or _pad_has_j) else 0.0), 3),
+                job_role_density=round(_pad_n_jobs / _pad_n if _pad_n > 0 else 0.0, 3),
+            )
             opportunities.append(
                 OpportunityItem(
                     title=pad_title,
@@ -1058,7 +1068,7 @@ def _build_opportunity_map(
                         savings_range_annual="$30k–$120k",
                         assumptions=["Template-padded: limited direct evidence for this bottleneck"],
                     ),
-                    score_breakdown=ScoreBreakdown(signal_frequency=1.0 / 3.0, source_diversity=1.0 / 3.0, job_role_density=1.0 / 3.0),
+                    score_breakdown=_pad_sb,
                     brief=_build_opportunity_brief(
                         title=pad_title,
                         ai_category=pad_cat,
@@ -1109,6 +1119,16 @@ def _build_opportunity_map(
         if not ev_fb:
             ev_fb = [EvidenceItem(title=f"{industry} context", link="#", source="headline")]
         fb_cat = _bottleneck_to_ai_category(fp, template)
+        # Generic fallback: no keyword match at all, so signal_frequency is 0.
+        _fb_n = len(ev_fb)
+        _fb_n_jobs = sum(1 for e in ev_fb if e.source == "job")
+        _fb_has_h = any(e.source == "headline" for e in ev_fb)
+        _fb_has_j = _fb_n_jobs > 0
+        _fb_sb = ScoreBreakdown(
+            signal_frequency=0.0,
+            source_diversity=round(1.0 if (_fb_has_h and _fb_has_j) else (0.5 if (_fb_has_h or _fb_has_j) else 0.0), 3),
+            job_role_density=round(_fb_n_jobs / _fb_n if _fb_n > 0 else 0.0, 3),
+        )
         opportunities.append(
             OpportunityItem(
                 title=fp[:50],
@@ -1123,7 +1143,7 @@ def _build_opportunity_map(
                     savings_range_annual="$30k–$100k",
                     assumptions=["Template-padded: limited direct evidence; industry template only"],
                 ),
-                score_breakdown=ScoreBreakdown(signal_frequency=1.0 / 3.0, source_diversity=1.0 / 3.0, job_role_density=1.0 / 3.0),
+                score_breakdown=_fb_sb,
                 brief=_build_opportunity_brief(
                     title=fp[:50],
                     ai_category=fb_cat,

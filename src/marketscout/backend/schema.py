@@ -36,18 +36,23 @@ class BusinessCase(BaseModel):
 
 
 class ScoreBreakdown(BaseModel):
-    """Explainable scoring weights per opportunity; must sum to 1.0."""
+    """Independent scoring metrics per opportunity.  Each dimension is 0.0–1.0; they do NOT need to sum to 1.0.
 
-    signal_frequency: float = Field(..., ge=0.0, le=1.0, description="Weight from evidence/signal frequency")
-    source_diversity: float = Field(..., ge=0.0, le=1.0, description="Weight from headline+job mix")
-    job_role_density: float = Field(..., ge=0.0, le=1.0, description="Weight from job listing density")
+    Dimensions:
+        signal_frequency:  Fraction of all input signals (headlines + jobs) that matched this opportunity.
+                           More matches relative to total signals → higher frequency.
+        source_diversity:  Whether multiple signal-source types contributed.
+                           1.0 = both job listings and news/headlines present; 0.5 = only one type; 0.0 = none.
+        job_role_density:  Fraction of the matching signals that are job postings (vs news headlines).
+                           1.0 = all jobs; 0.0 = all headlines.
 
-    @model_validator(mode="after")
-    def check_sum_to_one(self) -> "ScoreBreakdown":
-        total = self.signal_frequency + self.source_diversity + self.job_role_density
-        if abs(total - 1.0) > 1e-6:
-            raise ValueError(f"score_breakdown must sum to 1.0, got {total}")
-        return self
+    Composite:
+        total_score = (signal_frequency * 0.4) + (source_diversity * 0.3) + (job_role_density * 0.3)
+    """
+
+    signal_frequency: float = Field(..., ge=0.0, le=1.0, description="Fraction of total signals matching this opportunity")
+    source_diversity: float = Field(..., ge=0.0, le=1.0, description="Source-type coverage: 1.0=both jobs+news, 0.5=one type, 0.0=none")
+    job_role_density: float = Field(..., ge=0.0, le=1.0, description="Fraction of matching signals that are job postings")
 
 
 class OpportunityBrief(BaseModel):

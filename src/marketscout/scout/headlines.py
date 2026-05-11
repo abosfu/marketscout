@@ -1,4 +1,4 @@
-"""Fetch and parse business headlines from Google News RSS (no API key). Live only; no sample fallback at runtime."""
+"""Fetch business headlines: NewsAPI when ``NEWSAPI_KEY`` is set, otherwise Google News RSS."""
 
 from __future__ import annotations
 
@@ -8,8 +8,9 @@ import xml.etree.ElementTree as ET
 
 import requests
 
-from marketscout.config import get_default_city, get_max_headlines
+from marketscout.config import get_default_city, get_max_headlines, get_newsapi_key
 from marketscout.scout.errors import ScoutError
+from marketscout.scout.providers.newsapi import fetch_news_headlines
 
 GOOGLE_NEWS_RSS_BASE = "https://news.google.com/rss/search"
 DEFAULT_LIMIT = 10
@@ -101,6 +102,13 @@ def fetch_headlines(
     Raises ScoutError on network or parse failure. No sample fallback at runtime.
     """
     limit = limit if limit is not None else get_max_headlines()
+    if url is None and get_newsapi_key():
+        try:
+            items = fetch_news_headlines(city=city, industry=industry, limit=limit)
+            items = _normalize_dedupe_headlines(items)
+            return items
+        except ScoutError:
+            pass
     if url is None:
         url = build_rss_url(city=city, industry=industry)
     last_err: Exception | None = None

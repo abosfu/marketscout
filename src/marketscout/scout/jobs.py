@@ -1,11 +1,16 @@
-"""Jobs Scout: fetch job-related signals from RSS. Live only; no sample fallback at runtime."""
+"""Jobs Scout: fetch job-related signals from SerpAPI, Adzuna, or RSS (live only)."""
 
 from __future__ import annotations
 
 from typing import Any
 
+from marketscout.config import get_serpapi_key
 from marketscout.scout.errors import ScoutError
-from marketscout.scout.providers import AdzunaProvider, RssJobsProvider
+from marketscout.scout.providers import (
+    AdzunaProvider,
+    RssJobsProvider,
+    SerpApiJobsProvider,
+)
 
 DEFAULT_JOBS_LIMIT = 10
 
@@ -26,38 +31,76 @@ def _normalize_job(item: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _fetch_jobs_auto(
+    city: str,
+    industry: str,
+    limit: int,
+) -> list[dict[str, str]]:
+    """SerpAPI (if key) → Adzuna (if configured) → RSS."""
+    if get_serpapi_key():
+        try:
+            serp = SerpApiJobsProvider()
+            return serp.fetch_jobs(city=city, industry=industry, limit=limit)
+        except ScoutError:
+            pass
+
+    primary_error: Exception | None = None
+    try:
+        adzuna = AdzunaProvider()
+        return adzuna.fetch_jobs(city=city, industry=industry, limit=limit)
+    except ScoutError as e:
+        primary_error = e
+
+    try:
+        rss = RssJobsProvider()
+        return rss.fetch_jobs(city=city, industry=industry, limit=limit)
+    except ScoutError:
+        pass
+
+    raise ScoutError(str(primary_error) if primary_error is not None else "Jobs provider failed.")
+
+
 def fetch_jobs(
     city: str | None = None,
     industry: str | None = None,
     limit: int = DEFAULT_JOBS_LIMIT,
-    provider: str = "adzuna",
+    provider: str = "auto",
     allow_fallback: bool = False,
 ) -> list[dict[str, str]]:
     """
-    Fetch job listings using a pluggable provider (default: Adzuna).
+    Fetch job listings using a pluggable provider (default: auto chain).
 
     Args:
         city: Target city (used for provider queries).
         industry: Target industry / keyword.
         limit: Max number of jobs to return.
-        provider: Which provider to use: "adzuna" (default) or "rss".
-        allow_fallback: If True and the primary provider fails, fall back to RSS provider.
+        provider: ``auto`` (SerpAPI if ``SERPAPI_KEY``, else Adzuna if configured,
+            else RSS), ``serpapi``, ``adzuna``, or ``rss``.
+        allow_fallback: For ``adzuna`` only: if True, fall back to RSS when Adzuna fails.
+            Ignored when ``provider`` is ``auto`` (RSS is always the last resort).
 
     Raises:
         ScoutError: On provider failure or unknown provider.
     """
     city = (city or "Vancouver").strip()
     industry = (industry or "construction").strip()
-    provider_key = (provider or "adzuna").strip().lower()
+    provider_key = (provider or "auto").strip().lower()
 
     if provider_key == "rss":
         rss = RssJobsProvider()
         return rss.fetch_jobs(city=city, industry=industry, limit=limit)
 
+    if provider_key == "serpapi":
+        serp = SerpApiJobsProvider()
+        return serp.fetch_jobs(city=city, industry=industry, limit=limit)
+
+    if provider_key == "auto":
+        return _fetch_jobs_auto(city=city, industry=industry, limit=limit)
+
     if provider_key != "adzuna":
         raise ScoutError(
             f"Unknown jobs provider '{provider_key}'. "
-            "Supported providers are: 'adzuna', 'rss'."
+            "Supported providers are: 'auto', 'serpapi', 'adzuna', 'rss'."
         )
 
     primary_error: Exception | None = None
