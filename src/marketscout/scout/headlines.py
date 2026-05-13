@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 import urllib.parse
 import xml.etree.ElementTree as ET
@@ -11,6 +12,8 @@ import requests
 from marketscout.config import get_default_city, get_max_headlines, get_newsapi_key
 from marketscout.scout.errors import ScoutError
 from marketscout.scout.providers.newsapi import fetch_news_headlines
+
+logger = logging.getLogger(__name__)
 
 GOOGLE_NEWS_RSS_BASE = "https://news.google.com/rss/search"
 DEFAULT_LIMIT = 10
@@ -104,6 +107,8 @@ def fetch_headlines(
     limit = limit if limit is not None else get_max_headlines()
     if url is None and get_newsapi_key():
         try:
+            source_name = "newsapi"
+            logger.info("Headlines provider: %s", source_name)
             items = fetch_news_headlines(city=city, industry=industry, limit=limit)
             items = _normalize_dedupe_headlines(items)
             return items
@@ -111,6 +116,8 @@ def fetch_headlines(
             pass
     if url is None:
         url = build_rss_url(city=city, industry=industry)
+    source_name = "rss"
+    logger.info("Headlines provider: %s", source_name)
     last_err: Exception | None = None
     for attempt in range(RETRIES + 1):
         try:

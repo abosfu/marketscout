@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from marketscout.config import get_serpapi_key
@@ -11,6 +12,8 @@ from marketscout.scout.providers import (
     RssJobsProvider,
     SerpApiJobsProvider,
 )
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_JOBS_LIMIT = 10
 
@@ -40,6 +43,8 @@ def _fetch_jobs_auto(
     if get_serpapi_key():
         try:
             serp = SerpApiJobsProvider()
+            provider_name = "serpapi"
+            logger.info("Jobs provider: %s", provider_name)
             return serp.fetch_jobs(city=city, industry=industry, limit=limit)
         except ScoutError:
             pass
@@ -47,12 +52,16 @@ def _fetch_jobs_auto(
     primary_error: Exception | None = None
     try:
         adzuna = AdzunaProvider()
+        provider_name = "adzuna"
+        logger.info("Jobs provider: %s", provider_name)
         return adzuna.fetch_jobs(city=city, industry=industry, limit=limit)
     except ScoutError as e:
         primary_error = e
 
     try:
         rss = RssJobsProvider()
+        provider_name = "rss"
+        logger.info("Jobs provider: %s", provider_name)
         return rss.fetch_jobs(city=city, industry=industry, limit=limit)
     except ScoutError:
         pass
@@ -88,10 +97,14 @@ def fetch_jobs(
 
     if provider_key == "rss":
         rss = RssJobsProvider()
+        provider_name = "rss"
+        logger.info("Jobs provider: %s", provider_name)
         return rss.fetch_jobs(city=city, industry=industry, limit=limit)
 
     if provider_key == "serpapi":
         serp = SerpApiJobsProvider()
+        provider_name = "serpapi"
+        logger.info("Jobs provider: %s", provider_name)
         return serp.fetch_jobs(city=city, industry=industry, limit=limit)
 
     if provider_key == "auto":
@@ -106,6 +119,8 @@ def fetch_jobs(
     primary_error: Exception | None = None
     try:
         adzuna = AdzunaProvider()
+        provider_name = "adzuna"
+        logger.info("Jobs provider: %s", provider_name)
         return adzuna.fetch_jobs(city=city, industry=industry, limit=limit)
     except ScoutError as e:
         primary_error = e
@@ -113,6 +128,8 @@ def fetch_jobs(
     if allow_fallback:
         try:
             rss = RssJobsProvider()
+            provider_name = "rss"
+            logger.info("Jobs provider: %s", provider_name)
             return rss.fetch_jobs(city=city, industry=industry, limit=limit)
         except ScoutError:
             pass
