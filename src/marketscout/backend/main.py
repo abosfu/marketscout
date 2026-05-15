@@ -74,15 +74,25 @@ def _execute_search_pipeline(
     Isolated into its own function so tests can monkeypatch
     ``marketscout.backend.main._execute_search_pipeline`` without touching
     network calls or the database.
+
+    Headlines and jobs are each fetched with a fixed volume (50) so more
+    signals are available for keyword coverage; ``limit`` remains on the
+    request model for API compatibility.
     """
     from marketscout.backend.ai import generate_strategy
     from marketscout.config import get_db_path
     from marketscout.db import init_db, write_gold
     from marketscout.scout import fetch_headlines, fetch_jobs
 
+    _ = limit  # reserved for API; fetch volume fixed below
+    headlines_fetch_limit = 50
+    jobs_fetch_limit = 50
+
     run_id = int(datetime.utcnow().timestamp())
-    headlines = fetch_headlines(city=city, industry=industry, limit=limit)
-    jobs = fetch_jobs(city=city, industry=industry, limit=limit)
+    headlines = fetch_headlines(
+        city=city, industry=industry, limit=headlines_fetch_limit
+    )
+    jobs = fetch_jobs(city=city, industry=industry, limit=jobs_fetch_limit)
     strategy = generate_strategy(headlines, industry=industry, city=city, jobs=jobs)
     db_path = get_db_path()
     init_db(db_path)

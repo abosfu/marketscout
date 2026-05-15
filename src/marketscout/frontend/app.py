@@ -57,6 +57,19 @@ def _detail(resp: requests.Response) -> str:
         return resp.text
 
 
+def _composite_score_from_sb(sb: dict | None) -> float:
+    """Composite score from score_breakdown (signal_frequency/diversity/job_role_density)."""
+    if not sb:
+        return 0.0
+    try:
+        sf = float(sb.get("signal_frequency", 0.0))
+        sd = float(sb.get("source_diversity", 0.0))
+        jr = float(sb.get("job_role_density", 0.0))
+    except Exception:
+        return 0.0
+    return float(sf * 0.4 + sd * 0.3 + jr * 0.3)
+
+
 def _build_rows(opps: list, city: str, industry: str) -> list[dict]:
     """Map OpportunityItem dicts to the display row shape expected by the dashboard."""
     rows = []
@@ -67,9 +80,8 @@ def _build_rows(opps: list, city: str, industry: str) -> list[dict]:
             company = (leads[0].get("company_name") or "").strip()
         if not company:
             company = (opp.get("title") or "")[:35]
-        total_score = round(
-            (float(opp.get("pain_score", 0)) + float(opp.get("roi_signal", 0))) / 2, 2
-        )
+        sb = opp.get("score_breakdown") or {}
+        total_score = round(_composite_score_from_sb(sb), 3)
         rows.append(
             {
                 "company": company,
@@ -152,24 +164,59 @@ if current_run:
     kpi1, kpi2, kpi3 = st.columns(3)
     kpi1.metric("Signals Captured", signal_count)
     kpi2.metric("Opportunities Ranked", len(opps))
-    kpi3.metric("Top Score", top_score)
+    with kpi3:
+        st.markdown("**Top Score**")
+        if top_score > 0:
+            st.markdown(f"**{top_score:.2f}**")
+        else:
+            st.markdown(
+                '<p style="color:#888; margin:0">No signal detected</p>',
+                unsafe_allow_html=True,
+            )
 
     st.write("")
 
     # ── B) Top Ranked Targets ─────────────────────────────────────────────────
     st.subheader("Top Ranked Targets")
 
-    df_display = pd.DataFrame(rows_sorted)[
-        ["company", "total_score", "rank", "signal_count", "city", "industry"]
+    table_html = [
+        "<table style='width:100%; border-collapse:collapse'>",
+        "<thead><tr>"
+        "<th style='text-align:left; padding:8px'>Company</th>"
+        "<th style='text-align:left; padding:8px'>Composite score</th>"
+        "<th style='text-align:right; padding:8px'>Rank</th>"
+        "<th style='text-align:right; padding:8px'>Signal count</th>"
+        "<th style='text-align:left; padding:8px'>City</th>"
+        "<th style='text-align:left; padding:8px'>Industry</th>"
+        "</tr></thead><tbody>",
     ]
-    st.dataframe(df_display, use_container_width=True, hide_index=True)
+    for r in rows_sorted:
+        ts = float(r["total_score"])
+        score_cell = (
+            '<span style="color:#888">No signal detected</span>'
+            if ts <= 0
+            else f"{ts:.3f}"
+        )
+        co = str(r.get("company", "")).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        city_esc = str(r.get("city", "")).replace("&", "&amp;").replace("<", "&lt;")
+        ind_esc = str(r.get("industry", "")).replace("&", "&amp;").replace("<", "&lt;")
+        table_html.append(
+            "<tr>"
+            f"<td style='padding:8px'>{co}</td>"
+            f"<td style='padding:8px'>{score_cell}</td>"
+            f"<td style='padding:8px; text-align:right'>{r.get('rank', '')}</td>"
+            f"<td style='padding:8px; text-align:right'>{r.get('signal_count', '')}</td>"
+            f"<td style='padding:8px'>{city_esc}</td>"
+            f"<td style='padding:8px'>{ind_esc}</td>"
+            "</tr>"
+        )
+    table_html.append("</tbody></table>")
+    st.markdown("".join(table_html), unsafe_allow_html=True)
 
-    # Expandable score_breakdown per opportunity (sorted to match table order)
+    # Expandable score_breakdown per opportunity (sorted by composite score)
     opps_sorted = sorted(
         opps,
-        key=lambda o: round(
-            (float(o.get("pain_score", 0)) + float(o.get("roi_signal", 0))) / 2, 2
-        ),
+        key=lambda o: _composite_score_from_sb(o.get("score_breakdown") or {}),
         reverse=True,
     )
     for opp in opps_sorted:
@@ -183,9 +230,25 @@ if current_run:
 
     # ── C) Market Signals ─────────────────────────────────────────────────────
     st.subheader("Market Signals")
-    if rows_sorted:
-        chart_df = pd.DataFrame(rows_sorted).set_index("company")[["signal_count"]]
-        st.bar_chart(chart_df)
+    if opps:
+        chart_rows: list[dict[str, float]] = []
+        for opp in opps:
+            sb = opp.get("score_breakdown") or {}
+            sf = float(sb.get("signal_frequency", 0.0)) if sb else 0.0
+            category = (opp.get("problem") or opp.get("title") or "Opportunity").strip()
+            if sf > 0:
+                chart_rows.append({"category": category, "signal_frequency": sf})
+            else:
+                st.markdown(f"**{category}**")
+                st.markdown(
+                    '<p style="color:#888; margin:0 0 0.75rem 0">No signal detected</p>',
+                    unsafe_allow_html=True,
+                )
+        if chart_rows:
+            chart_df = pd.DataFrame(chart_rows).set_index("category")[
+                ["signal_frequency"]
+            ]
+            st.bar_chart(chart_df)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

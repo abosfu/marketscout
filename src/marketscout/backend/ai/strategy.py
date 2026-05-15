@@ -843,7 +843,9 @@ def _build_opportunity_map(
             continue
         title_lower = title.lower()
         for kw, problem in kw_items:
-            if kw in title_lower:
+            # Word-boundary match to avoid false positives like
+            # "labor" in "collaboration" or "rate" in "Accelerate".
+            if re.search(r"\b" + re.escape(kw) + r"\b", title_lower):
                 key = problem
                 if key not in bucket:
                     bucket[key] = []
@@ -861,7 +863,7 @@ def _build_opportunity_map(
             continue
         title_lower = title.lower()
         for kw, problem in kw_items:
-            if kw in title_lower:
+            if re.search(r"\b" + re.escape(kw) + r"\b", title_lower):
                 key = problem
                 if key not in bucket:
                     bucket[key] = []

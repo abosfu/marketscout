@@ -40,13 +40,20 @@ def fetch_news_headlines(
     limit = limit if limit is not None else get_max_headlines()
     limit = max(1, min(limit, 100))
 
-    q_parts = [industry, city] if industry else [city, "business"]
-    q = " ".join(p for p in q_parts if p).strip()
+    # Target construction-specific news: require the city and at least one
+    # construction-related term in the title or description.
+    head = city
+    q = (
+        f'"{head}" AND '
+        f'("{industry}" OR "building" OR "contractor" OR "housing" '
+        f'OR "development" OR "permit" OR "renovation")'
+    )
 
     params: dict[str, Any] = {
         "q": q,
         "language": "en",
-        "sortBy": "publishedAt",
+        "sortBy": "relevancy",
+        "searchIn": "title,description",
         "pageSize": limit,
         "apiKey": key,
     }
