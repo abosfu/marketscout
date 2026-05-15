@@ -29,7 +29,7 @@ async def test_search_returns_200_with_correct_shape() -> None:
 
     with patch(
         "marketscout.backend.main._execute_search_pipeline",
-        return_value=(1714000000, mock_opps, 18),
+        return_value=(1714000000, mock_opps, 18, [], []),
     ):
         async with httpx.AsyncClient(transport=_TRANSPORT, base_url=_BASE) as ac:
             response = await ac.post(

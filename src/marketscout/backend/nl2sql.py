@@ -31,6 +31,25 @@ router = APIRouter()
 # Keywords that must never appear in AI-generated SQL.
 _UNSAFE_KEYWORDS: frozenset[str] = frozenset({"DROP", "DELETE", "UPDATE", "INSERT"})
 
+# Extra schema context for Gemini (dim_signals company-level fields).
+_GOLD_SCHEMA_HINT = """
+MarketScout Gold layer (SQLite) — use these tables for company and hiring questions:
+
+dim_signals — one row per raw headline or job posting captured in a run:
+  - id, run_id, source, title, summary, url, captured_at, content_hash
+  - company_name (TEXT, nullable): employer from job postings; NULL for news-only rows
+  - signal_type (TEXT): 'job' for job listings (google_jobs, adzuna sources), 'news' for headlines
+
+dim_opportunities — scored opportunity categories per run (company, total_score, rank, …)
+dim_runs — run metadata (id, city, industry, signal_count, …)
+fact_leads — links opportunities to supporting signals
+
+For questions like "What is [Company] hiring for?" query dim_signals WHERE
+signal_type = 'job' AND company_name LIKE '%Company%' (case-insensitive) and return title.
+For news about a company, use signal_type = 'news' and filter title or company_name.
+Always filter by the latest run_id when the user refers to the current search.
+"""
+
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
 
@@ -101,9 +120,10 @@ def _run_nl2sql_pipeline(question: str, db_path: str, api_key: str) -> tuple[str
         temperature=0,
     )
 
-    # Step 1 — generate SQL
+    # Step 1 — generate SQL (schema hint includes company_name / signal_type on dim_signals)
     chain = create_sql_query_chain(llm, db)
-    sql_query: str = chain.invoke({"question": question}).strip()
+    question_with_schema = f"{_GOLD_SCHEMA_HINT.strip()}\n\nUser question: {question}"
+    sql_query: str = chain.invoke({"question": question_with_schema}).strip()
 
     # Step 2 — safety gate (raises HTTP 400 on violation)
     _check_safety(sql_query)

@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
-from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text, create_engine
+from sqlalchemy import Column, DateTime, Float, ForeignKey, Integer, String, Text, create_engine, text
 from sqlalchemy.orm import DeclarativeBase, Session
 
 from marketscout.fs import project_root  # noqa: F401 — establishes path resolution anchor
@@ -70,6 +70,8 @@ class DimSignal(Base):
     url = Column(String, default="")
     captured_at = Column(DateTime, nullable=True)
     content_hash = Column(String, default="")
+    company_name = Column(Text, nullable=True)
+    signal_type = Column(String, default="news")
 
 
 class FactLead(Base):
@@ -90,6 +92,26 @@ class FactLead(Base):
 def _content_hash(title: str, url: str) -> str:
     """SHA-256 based 32-char hash for deduplication."""
     return hashlib.sha256(f"{title}|{url}".encode()).hexdigest()[:32]
+
+
+def _signal_type_from_source(source: str) -> str:
+    """Classify raw signal as job listing vs news headline."""
+    s = (source or "").lower()
+    if "google_jobs" in s or "adzuna" in s:
+        return "job"
+    return "news"
+
+
+def _migrate_dim_signals_columns(engine) -> None:
+    """Add company_name / signal_type to existing SQLite DBs (idempotent)."""
+    with engine.connect() as conn:
+        rows = conn.execute(text("PRAGMA table_info(dim_signals)")).fetchall()
+        col_names = {row[1] for row in rows}
+        if "company_name" not in col_names:
+            conn.execute(text("ALTER TABLE dim_signals ADD COLUMN company_name TEXT"))
+        if "signal_type" not in col_names:
+            conn.execute(text("ALTER TABLE dim_signals ADD COLUMN signal_type TEXT"))
+        conn.commit()
 
 
 def _parse_dt(ts: str | None) -> datetime | None:
@@ -115,6 +137,7 @@ def init_db(db_path: str | Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     engine = create_engine(f"sqlite:///{db_path}")
     Base.metadata.create_all(engine)
+    _migrate_dim_signals_columns(engine)
     engine.dispose()
 
 
@@ -174,6 +197,8 @@ def write_gold(
                     url = (sig.get("link") or "").strip()
                     source = (sig.get("source") or "").strip()
                     summary = (sig.get("company") or sig.get("source") or "").strip()
+                    company_name = (sig.get("company") or "").strip() or None
+                    signal_type = _signal_type_from_source(source)
                     ds = DimSignal(
                         run_id=run_id,
                         source=source,
@@ -182,6 +207,8 @@ def write_gold(
                         url=url,
                         captured_at=_parse_dt(sig.get("published")),
                         content_hash=_content_hash(title, url),
+                        company_name=company_name,
+                        signal_type=signal_type,
                     )
                     session.add(ds)
                     dim_signals.append(ds)

@@ -80,6 +80,103 @@ def _company_from_leads(opp: dict) -> str | None:
     return None
 
 
+def _names_match(a: str, b: str) -> bool:
+    """Case-insensitive company name equality."""
+    return a.strip().lower() == b.strip().lower()
+
+
+def _opportunities_for_company(opps: list, company: str) -> list[dict]:
+    """Opportunities whose leads include this company."""
+    matched: list[dict] = []
+    for opp in opps:
+        for lead in opp.get("leads") or []:
+            if isinstance(lead, dict) and _names_match(
+                lead.get("company_name") or "", company
+            ):
+                matched.append(opp)
+                break
+    return matched
+
+
+def _render_company_intelligence(
+    company: str,
+    opps: list,
+    run_data: dict,
+) -> None:
+    """Company panel: hiring titles, news mentions, pitch category (session data only)."""
+    cl = company.strip().lower()
+    jobs = run_data.get("jobs") or []
+    headlines = run_data.get("headlines") or []
+
+    hiring: list[str] = []
+    seen_jobs: set[str] = set()
+    for j in jobs:
+        if not isinstance(j, dict):
+            continue
+        if (j.get("company") or "").strip().lower() != cl:
+            continue
+        title = (j.get("title") or "").strip()
+        if title and title.lower() not in seen_jobs:
+            seen_jobs.add(title.lower())
+            hiring.append(title)
+
+    matched_opps = _opportunities_for_company(opps, company)
+    for opp in matched_opps:
+        for ev in opp.get("evidence") or []:
+            if not isinstance(ev, dict):
+                continue
+            if (ev.get("source") or "").strip().lower() != "job":
+                continue
+            title = (ev.get("title") or "").strip()
+            if title and title.lower() not in seen_jobs:
+                seen_jobs.add(title.lower())
+                hiring.append(title)
+
+    news: list[str] = []
+    seen_news: set[str] = set()
+    for h in headlines:
+        if not isinstance(h, dict):
+            continue
+        title = (h.get("title") or "").strip()
+        if cl in title.lower() and title.lower() not in seen_news:
+            seen_news.add(title.lower())
+            news.append(title)
+    for opp in matched_opps:
+        for ev in opp.get("evidence") or []:
+            if not isinstance(ev, dict):
+                continue
+            if (ev.get("source") or "").strip().lower() not in ("headline", "news"):
+                continue
+            title = (ev.get("title") or "").strip()
+            if cl in title.lower() and title.lower() not in seen_news:
+                seen_news.add(title.lower())
+                news.append(title)
+
+    pitch = ""
+    if matched_opps:
+        pitch = (matched_opps[0].get("problem") or matched_opps[0].get("title") or "").strip()
+
+    st.markdown("**Hiring for:**")
+    if hiring:
+        for t in hiring:
+            st.markdown(f"- {t}")
+    else:
+        st.markdown(":gray[No job titles found for this company in the current run.]")
+
+    st.markdown("**In the news:**")
+    if news:
+        for t in news:
+            st.markdown(f"- {t}")
+    else:
+        st.markdown(":gray[No headlines mentioning this company in the current run.]")
+
+    st.markdown("**What to pitch:**")
+    if pitch:
+        st.markdown(pitch)
+    else:
+        st.markdown(":gray[No mapped opportunity category for this company.]")
+
+
 def _build_rows(opps: list, city: str, industry: str) -> tuple[list[dict], int]:
     """Map opportunities with identified companies to table rows.
 
@@ -190,42 +287,30 @@ if current_run:
 
     st.write("")
 
-    # ── B) Top Ranked Targets ─────────────────────────────────────────────────
+    # ── B) Top Ranked Targets (company intelligence expanders) ─────────────────
     st.subheader("Top Ranked Targets")
 
-    table_html = [
-        "<table style='width:100%; border-collapse:collapse'>",
-        "<thead><tr>"
-        "<th style='text-align:left; padding:8px'>Company</th>"
-        "<th style='text-align:left; padding:8px'>Composite score</th>"
-        "<th style='text-align:right; padding:8px'>Rank</th>"
-        "<th style='text-align:right; padding:8px'>Signal count</th>"
-        "<th style='text-align:left; padding:8px'>City</th>"
-        "<th style='text-align:left; padding:8px'>Industry</th>"
-        "</tr></thead><tbody>",
-    ]
+    if not rows_sorted:
+        st.markdown(
+            '<p style="color:#888">No companies with identified hiring signals in this run.</p>',
+            unsafe_allow_html=True,
+        )
     for r in rows_sorted:
         ts = float(r["total_score"])
-        score_cell = (
-            '<span style="color:#888">No signal detected</span>'
+        company = r.get("company", "")
+        score_label = (
+            "No signal detected"
             if ts <= 0
-            else f"{ts:.3f}"
+            else f"composite {ts:.3f}"
         )
-        co = str(r.get("company", "")).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
-        city_esc = str(r.get("city", "")).replace("&", "&amp;").replace("<", "&lt;")
-        ind_esc = str(r.get("industry", "")).replace("&", "&amp;").replace("<", "&lt;")
-        table_html.append(
-            "<tr>"
-            f"<td style='padding:8px'>{co}</td>"
-            f"<td style='padding:8px'>{score_cell}</td>"
-            f"<td style='padding:8px; text-align:right'>{r.get('rank', '')}</td>"
-            f"<td style='padding:8px; text-align:right'>{r.get('signal_count', '')}</td>"
-            f"<td style='padding:8px'>{city_esc}</td>"
-            f"<td style='padding:8px'>{ind_esc}</td>"
-            "</tr>"
-        )
-    table_html.append("</tbody></table>")
-    st.markdown("".join(table_html), unsafe_allow_html=True)
+        expander_label = f"{company} — {score_label} (rank {r.get('rank', '')})"
+        with st.expander(expander_label):
+            meta_cols = st.columns(3)
+            meta_cols[0].markdown(f"**City:** {r.get('city', '')}")
+            meta_cols[1].markdown(f"**Industry:** {r.get('industry', '')}")
+            meta_cols[2].markdown(f"**Signals:** {r.get('signal_count', 0)}")
+            st.divider()
+            _render_company_intelligence(company, opps, current_run)
     if excluded_from_table > 0:
         plural = "s" if excluded_from_table != 1 else ""
         st.markdown(

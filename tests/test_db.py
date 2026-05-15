@@ -111,6 +111,17 @@ def test_write_gold_roundtrip(tmp_path: pytest.fixture) -> None:
     assert sig_count == 2                    # two raw signals
     assert lead_count == 4                   # 2 evidence items × 2 opportunities
 
+    conn = sqlite3.connect(str(db_path))
+    job_row = conn.execute(
+        "SELECT company_name, signal_type FROM dim_signals WHERE source = 'adzuna'"
+    ).fetchone()
+    news_row = conn.execute(
+        "SELECT company_name, signal_type FROM dim_signals WHERE source = 'CBC'"
+    ).fetchone()
+    conn.close()
+    assert job_row == ("BuildCo Inc.", "job")
+    assert news_row == (None, "news")
+
 
 def test_write_gold_idempotent(tmp_path: pytest.fixture) -> None:
     """Calling write_gold twice with the same run_id must not duplicate rows."""

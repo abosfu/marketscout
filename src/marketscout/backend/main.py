@@ -62,14 +62,33 @@ class EmailRequest(BaseModel):
 
 # ── Internal pipeline helper (isolated for test patching) ────────────────────
 
+def _normalize_signals_for_gold(
+    headlines: list[dict[str, Any]],
+    jobs: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Ensure each signal dict has company and source for Gold layer writes."""
+    out: list[dict[str, Any]] = []
+    for h in headlines:
+        sig = dict(h)
+        sig["company"] = (sig.get("company") or "").strip()
+        sig["source"] = (sig.get("source") or "newsapi").strip()
+        out.append(sig)
+    for j in jobs:
+        sig = dict(j)
+        sig["company"] = (sig.get("company") or "").strip()
+        sig["source"] = (sig.get("source") or "").strip()
+        out.append(sig)
+    return out
+
+
 def _execute_search_pipeline(
     city: str, industry: str, limit: int
-) -> tuple[int, list[dict], int]:
+) -> tuple[int, list[dict], int, list[dict[str, Any]], list[dict[str, Any]]]:
     """
     Run the full Bronze → Silver → Gold pipeline for one search request.
 
     Returns:
-        (run_id, opportunity_dicts, signal_count)
+        (run_id, opportunity_dicts, signal_count, jobs, headlines)
 
     Isolated into its own function so tests can monkeypatch
     ``marketscout.backend.main._execute_search_pipeline`` without touching
@@ -94,6 +113,7 @@ def _execute_search_pipeline(
     )
     jobs = fetch_jobs(city=city, industry=industry, limit=jobs_fetch_limit)
     strategy = generate_strategy(headlines, industry=industry, city=city, jobs=jobs)
+    signals = _normalize_signals_for_gold(headlines, jobs)
     db_path = get_db_path()
     init_db(db_path)
     write_gold(
@@ -101,10 +121,16 @@ def _execute_search_pipeline(
         city,
         industry,
         strategy.opportunity_map,
-        headlines + jobs,
+        signals,
         db_path=db_path,
     )
-    return run_id, strategy.to_json_dict()["opportunity_map"], len(headlines) + len(jobs)
+    return (
+        run_id,
+        strategy.to_json_dict()["opportunity_map"],
+        len(signals),
+        jobs,
+        headlines,
+    )
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -124,13 +150,15 @@ def search(body: SearchRequest) -> dict:
     Returns HTTP 500 with {"detail": str(e)} on any pipeline failure.
     """
     try:
-        run_id, opportunities, signal_count = _execute_search_pipeline(
+        run_id, opportunities, signal_count, jobs, headlines = _execute_search_pipeline(
             body.city, body.industry, body.limit
         )
         return {
             "run_id": run_id,
             "opportunities": opportunities,
             "signal_count": signal_count,
+            "jobs": jobs,
+            "headlines": headlines,
         }
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
