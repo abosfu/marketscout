@@ -70,16 +70,30 @@ def _composite_score_from_sb(sb: dict | None) -> float:
     return float(sf * 0.4 + sd * 0.3 + jr * 0.3)
 
 
-def _build_rows(opps: list, city: str, industry: str) -> list[dict]:
-    """Map OpportunityItem dicts to the display row shape expected by the dashboard."""
-    rows = []
-    for rank, opp in enumerate(opps, start=1):
-        leads = opp.get("leads") or []
-        company = ""
-        if leads and isinstance(leads[0], dict):
-            company = (leads[0].get("company_name") or "").strip()
+def _company_from_leads(opp: dict) -> str | None:
+    """First non-empty company_name from leads; None if no identified company."""
+    for lead in opp.get("leads") or []:
+        if isinstance(lead, dict):
+            name = (lead.get("company_name") or "").strip()
+            if name:
+                return name
+    return None
+
+
+def _build_rows(opps: list, city: str, industry: str) -> tuple[list[dict], int]:
+    """Map opportunities with identified companies to table rows.
+
+    Returns (rows, excluded_count) for opportunities skipped (no lead company).
+    """
+    rows: list[dict] = []
+    excluded = 0
+    rank = 0
+    for opp in opps:
+        company = _company_from_leads(opp)
         if not company:
-            company = (opp.get("title") or "")[:35]
+            excluded += 1
+            continue
+        rank += 1
         sb = opp.get("score_breakdown") or {}
         total_score = round(_composite_score_from_sb(sb), 3)
         rows.append(
@@ -92,7 +106,7 @@ def _build_rows(opps: list, city: str, industry: str) -> list[dict]:
                 "industry": industry,
             }
         )
-    return rows
+    return rows, excluded
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -154,7 +168,7 @@ if current_run:
     industry_label = current_run.get("industry", "")
     signal_count = current_run.get("signal_count", 0)
 
-    rows = _build_rows(opps, city_label, industry_label)
+    rows, excluded_from_table = _build_rows(opps, city_label, industry_label)
     rows_sorted = sorted(rows, key=lambda r: r["total_score"], reverse=True)
     top_score = round(rows_sorted[0]["total_score"], 2) if rows_sorted else 0.0
 
@@ -212,6 +226,16 @@ if current_run:
         )
     table_html.append("</tbody></table>")
     st.markdown("".join(table_html), unsafe_allow_html=True)
+    if excluded_from_table > 0:
+        plural = "s" if excluded_from_table != 1 else ""
+        st.markdown(
+            "<p style='color:#888; margin-top:0.75rem'>"
+            "Only showing targets with identified companies. "
+            f"{excluded_from_table} additional market signal{plural} detected "
+            "without company matches."
+            "</p>",
+            unsafe_allow_html=True,
+        )
 
     # Expandable score_breakdown per opportunity (sorted by composite score)
     opps_sorted = sorted(
