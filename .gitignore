@@ -59,3 +59,4 @@ out/
 # Zip archives created by `marketscout bundle`
 *.zip
 .envtab
+.env.save

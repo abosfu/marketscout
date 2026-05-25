@@ -1289,18 +1289,19 @@ def _call_groq_for_strategy(
 City: {city}
 Industry: {industry}
 
-Job postings (index → title — company):
+JOB POSTINGS (from Google Jobs — use these to determine what companies are hiring for):
 {chr(10).join(job_lines) or "(none)"}
 
-News headlines (index → title):
+NEWS HEADLINES (from news sources — use for market context only, NOT for hiring signals):
 {chr(10).join(headline_lines) or "(none)"}
 
-For each UNIQUE company in the job postings above, identify:
+Using ONLY the JOB POSTINGS above (not the news headlines), for each UNIQUE company identify:
 1. What pain or pressure they are signalling through their hiring activity.
-2. The job posting indices that belong to this company.
+2. The job posting indices that belong to this company (use [j0], [j1] notation).
 3. A one-line pitch for what product or service to offer them.
 
 Return the top 10 companies ranked by hiring urgency (most roles / most urgent pain first).
+If there are no job postings, return an empty companies list.
 
 Return ONLY a valid JSON object — no markdown fences, no explanation:
 {{

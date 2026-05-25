@@ -436,6 +436,21 @@ def _belongs_to_run(item: dict, current_run_id) -> bool:
     return rid == current_run_id
 
 
+def _is_valid_job_title(title: str) -> bool:
+    """Return True only if the string looks like a real job title.
+
+    Rejects strings that are URLs, overly long (article titles / snippets),
+    or otherwise not suitable for display in the HIRING FOR list.
+    """
+    if not title:
+        return False
+    if "http" in title or "://" in title:
+        return False
+    if len(title) > 80:
+        return False
+    return True
+
+
 def _collect_company_intelligence(
     company: str,
     opps: list,
@@ -444,6 +459,8 @@ def _collect_company_intelligence(
     """Return (hiring_titles, pitch) for the given company.
 
     Only job signals belonging to the current run_id are considered.
+    Titles that look like URLs or news snippets are filtered out via
+    _is_valid_job_title so the HIRING FOR list stays clean.
     """
     cl = company.strip().lower()
     current_run_id = run_data.get("run_id")
@@ -459,7 +476,7 @@ def _collect_company_intelligence(
         if (j.get("company") or "").strip().lower() != cl:
             continue
         title = (j.get("title") or "").strip()
-        if title and title.lower() not in seen_jobs:
+        if title and _is_valid_job_title(title) and title.lower() not in seen_jobs:
             seen_jobs.add(title.lower())
             hiring.append(title)
 
@@ -471,7 +488,7 @@ def _collect_company_intelligence(
             if (ev.get("source") or "").strip().lower() != "job":
                 continue
             title = (ev.get("title") or "").strip()
-            if title and title.lower() not in seen_jobs:
+            if title and _is_valid_job_title(title) and title.lower() not in seen_jobs:
                 seen_jobs.add(title.lower())
                 hiring.append(title)
 
@@ -618,7 +635,7 @@ def _company_block_html(
     """HTML for one company intelligence block."""
     def _items(items: list[str]) -> str:
         if not items:
-            return '<span class="ms-intel-empty">—</span>'
+            return '<span class="ms-intel-empty">No active job postings found.</span>'
         lis = "".join(f"<li>{_h(t)}</li>" for t in items)
         return f'<ul class="ms-intel-list">{lis}</ul>'
 
