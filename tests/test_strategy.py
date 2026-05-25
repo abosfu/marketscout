@@ -29,7 +29,7 @@ from marketscout.leads import LeadRow, build_leads
 # ── Strategy generation ───────────────────────────────────────────────────────
 
 def test_generate_mock_strategy_returns_v2_schema() -> None:
-    """Mock strategy generator produces a valid v2.0 StrategyOutput with 5–8 opportunities."""
+    """Mock strategy generator produces a valid v2.0 StrategyOutput with 5–10 opportunities."""
     headlines = [
         {"title": "Labor shortage in Vancouver", "link": "https://a.com", "source": "A"},
         {"title": "Housing crisis and rates", "link": "https://b.com", "source": "B"},
@@ -39,7 +39,7 @@ def test_generate_mock_strategy_returns_v2_schema() -> None:
     assert isinstance(strategy, StrategyOutput)
     assert strategy.strategy_version == "2.0"
     assert strategy.city == "Vancouver" and strategy.industry == "Construction"
-    assert 5 <= len(strategy.opportunity_map) <= 8
+    assert 5 <= len(strategy.opportunity_map) <= 10
     assert strategy.signals_used.headlines_count == 3
     assert strategy.signals_used.jobs_count == 0
     assert 0 <= strategy.data_quality.coverage_score <= 1
@@ -57,11 +57,11 @@ def test_generate_mock_strategy_returns_v2_schema() -> None:
 
 
 def test_generate_mock_strategy_works_with_empty_headlines() -> None:
-    """Mock strategy with no headlines still produces 5–8 opportunities via fallback templates."""
+    """Mock strategy with no headlines still produces 5–10 opportunities via fallback templates."""
     strategy = generate_mock_strategy([], industry="Technology", city="Vancouver")
     assert isinstance(strategy, StrategyOutput)
     assert strategy.strategy_version == "2.0"
-    assert 5 <= len(strategy.opportunity_map) <= 8
+    assert 5 <= len(strategy.opportunity_map) <= 10
 
 
 def test_generate_strategy_force_mock_returns_v2() -> None:
@@ -74,7 +74,7 @@ def test_generate_strategy_force_mock_returns_v2() -> None:
     )
     assert isinstance(strategy, StrategyOutput)
     assert strategy.strategy_version == "2.0"
-    assert 5 <= len(strategy.opportunity_map) <= 8
+    assert 5 <= len(strategy.opportunity_map) <= 10
     assert strategy.city == "Toronto" and strategy.industry == "Retail"
 
 
@@ -141,7 +141,7 @@ def test_v2_fixture_validates_schema_and_scores(sample_strategy_v2_path: Path) -
     strategy = StrategyOutput.model_validate(data)
     assert strategy.strategy_version == "2.0"
     assert strategy.city == "Vancouver" and strategy.industry == "Construction"
-    assert 5 <= len(strategy.opportunity_map) <= 8
+    assert 5 <= len(strategy.opportunity_map) <= 10
     assert strategy.signals_used.headlines_count >= 0
     assert 0 <= strategy.data_quality.coverage_score <= 1
     assert 0 <= strategy.data_quality.source_mix_score <= 1
@@ -155,7 +155,7 @@ def test_v2_fixture_validates_schema_and_scores(sample_strategy_v2_path: Path) -
 
 
 def test_opportunity_map_length_bounds() -> None:
-    """StrategyOutput rejects opportunity_map with fewer than 5 or more than 8 items."""
+    """StrategyOutput rejects opportunity_map with fewer than 5 or more than 10 items."""
     def make_opp(i: int) -> dict:
         return {
             "title": f"Opp {i}", "problem": f"Problem {i}",
@@ -170,11 +170,11 @@ def test_opportunity_map_length_bounds() -> None:
         "data_quality": {"freshness_window_days": 1, "coverage_score": 0.5, "source_mix_score": 0.5},
     }
     StrategyOutput.model_validate({**base, "opportunity_map": [make_opp(i) for i in range(5)]})
-    StrategyOutput.model_validate({**base, "opportunity_map": [make_opp(i) for i in range(8)]})
+    StrategyOutput.model_validate({**base, "opportunity_map": [make_opp(i) for i in range(10)]})
     with pytest.raises(ValidationError):
         StrategyOutput.model_validate({**base, "opportunity_map": [make_opp(i) for i in range(4)]})
     with pytest.raises(ValidationError):
-        StrategyOutput.model_validate({**base, "opportunity_map": [make_opp(i) for i in range(9)]})
+        StrategyOutput.model_validate({**base, "opportunity_map": [make_opp(i) for i in range(11)]})
 
 
 def test_get_json_schema_returns_dict() -> None:

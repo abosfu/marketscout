@@ -156,6 +156,14 @@ def write_gold(
     Idempotent: if run_id already exists the function returns immediately without
     writing any rows.  On any failure the entire transaction is rolled back.
 
+    Run-scoping invariant:
+        Every row in ``dim_signals``, ``dim_opportunities`` and ``fact_leads``
+        is tagged with ``run_id`` (a FK to ``dim_runs.id``). Consumers querying
+        for "the current search" must always filter by run_id to avoid bleeding
+        company / signal data across runs. The frontend never queries the Gold
+        layer directly — it consumes the live ``/search`` response — but any
+        SQL-level reader (NL2SQL, ad-hoc queries) must respect this invariant.
+
     Args:
         run_id:        UUID string for this pipeline run.
         city:          Canonical city name.

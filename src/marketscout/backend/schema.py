@@ -203,8 +203,8 @@ class StrategyOutput(BaseModel):
     opportunity_map: list[OpportunityItem] = Field(
         ...,
         min_length=5,
-        max_length=8,
-        description="5–8 opportunities with evidence and business case",
+        max_length=10,
+        description="5–10 opportunities with evidence and business case",
     )
     signals_used: SignalsUsed = Field(..., description="Counts of signals used")
     data_quality: DataQuality = Field(..., description="Freshness, coverage, and source mix")

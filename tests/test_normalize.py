@@ -108,7 +108,9 @@ class TestNormalizeIndustry:
         assert normalize_industry("  real   estate  ") == "Real Estate"
 
     def test_unknown_returns_none(self):
-        assert normalize_industry("Fintech") is None
+        # Note: "Fintech" is now an alias for Technology.
+        # Use genuinely unrecognised inputs here.
+        assert normalize_industry("Underwater Basket Weaving") is None
         assert normalize_industry("Unknown Industry") is None
         assert normalize_industry("") is None
         assert normalize_industry("   ") is None
@@ -142,8 +144,18 @@ class TestGetTemplate:
     def test_real_estate_lowercase(self):
         assert get_template("real estate").industry_name == "Real Estate"
 
-    def test_unknown_falls_back_to_construction(self):
-        assert get_template("XYZ Unknown").industry_name == "Construction"
+    def test_unknown_returns_dynamic_template(self):
+        """Unrecognised inputs get a dynamic cross-industry template, not a Construction fallback."""
+        t = get_template("XYZ Unknown")
+        # Must NOT silently fall back to the wrong vertical
+        assert t.industry_name != "Construction"
+        # Should preserve the raw input (title-cased) as the template name
+        assert t.industry_name == "Xyz Unknown"
+        # Dynamic template has the five cross-industry bottleneck categories
+        assert "Workforce and hiring pressure" in t.common_bottlenecks
+        assert "Market competition and differentiation" in t.common_bottlenecks
+        # Keyword map must be non-empty so scoring still works
+        assert len(t.keyword_map) > 0
 
 
 # ── CLI: invalid industry validation ─────────────────────────────────────────
@@ -154,14 +166,15 @@ def test_cli_run_invalid_industry_exits_one(
     """cmd_run returns 1 and prints a helpful error when industry is unrecognised."""
     from marketscout.cli import cmd_run
 
+    # "Astrology" is deliberately not in the alias table.
     exit_code = cmd_run(
-        city="Vancouver", industry="Fintech", out_dir=tmp_path / "out",
+        city="Vancouver", industry="Astrology", out_dir=tmp_path / "out",
         jobs_limit=5, headlines_limit=5, jobs_provider="rss",
         allow_provider_fallback=False, write_leads=False, refresh=False, deterministic=False,
     )
     assert exit_code == 1
     stderr = capsys.readouterr().err
-    assert "unrecognised industry" in stderr.lower() or "Fintech" in stderr
+    assert "unrecognised industry" in stderr.lower() or "Astrology" in stderr
     assert any(ind in stderr for ind in SUPPORTED_INDUSTRIES)
 
 

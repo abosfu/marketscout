@@ -1,4 +1,18 @@
-"""Strategy generation: deterministic opportunity map from headlines + jobs (v2.0). Optional LLM fallback."""
+"""Strategy generation: Groq-powered opportunity map from live signals (v2.0).
+
+Primary path (when GROQ_API_KEY is set):
+  _call_groq_for_strategy() — ask Groq (llama-3.1-8b-instant) to identify pain
+  categories from the actual job titles and headlines, then map back to
+  OpportunityItem objects using existing deterministic scoring helpers.
+
+Secondary AI path (when OPENAI_API_KEY is set and Groq unavailable):
+  _call_openai_for_strategy() — full StrategyOutput JSON via GPT-4o-mini.
+
+Fallback / mock path (MARKETSCOUT_MODE=mock or both keys missing):
+  generate_mock_strategy() → _build_opportunity_map() — keyword-based scoring
+  using industry template keyword_map. Deterministic and requires no API keys.
+  Used exclusively during tests (force_mock=True or MARKETSCOUT_MODE=mock).
+"""
 
 from __future__ import annotations
 
@@ -776,7 +790,7 @@ def _build_opportunity_map(
     deterministic: bool = False,
 ) -> list[OpportunityItem]:
     """
-    Build 5-8 opportunities from headlines + jobs using template keyword_map.
+    Build 5-10 opportunities from headlines + jobs using template keyword_map.
     Evidence only from provided headlines/jobs. Sorted by (pain_score + roi_signal)/2, then confidence.
     When deterministic=True, use stable ordering for keywords and sort opportunities deterministically.
 
@@ -1182,7 +1196,7 @@ def _build_opportunity_map(
         opportunities.sort(key=lambda o: (o.problem, -(o.pain_score + o.roi_signal) / 2.0, -o.confidence))
     else:
         opportunities.sort(key=lambda o: (-(o.pain_score + o.roi_signal) / 2.0, -o.confidence))
-    return opportunities[:8]
+    return opportunities[:10]
 
 
 def generate_mock_strategy(
@@ -1219,6 +1233,284 @@ def generate_mock_strategy(
     )
 
 
+def _call_groq_for_strategy(
+    headlines: list[dict[str, Any]],
+    industry: str,
+    city: str,
+    jobs: list[dict[str, Any]] | None = None,
+) -> StrategyOutput | None:
+    """
+    Ask Groq (llama-3.1-8b-instant) to identify pain categories from real signals,
+    then map the response back into the existing OpportunityItem schema.
+
+    Returns None on any failure so the caller can fall through to mock mode.
+
+    Groq is given the first 40 job titles+companies and 20 headline titles (with
+    their zero-based indices) so it can reference them in its JSON response.  We
+    then resolve those indices back to real EvidenceItem objects rather than
+    trusting the LLM to copy text verbatim.
+    """
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+
+    try:
+        from groq import Groq
+    except ImportError:
+        return None
+
+    api_key = os.environ.get("GROQ_API_KEY", "").strip()
+    if not api_key:
+        return None
+
+    jobs = jobs or []
+
+    # Build compact numbered lists to keep the prompt within the context window.
+    job_lines: list[str] = []
+    for i, j in enumerate(jobs[:40]):
+        title = (j.get("title") or "").strip()
+        company = (j.get("company") or "").strip()
+        if title or company:
+            job_lines.append(f"[j{i}] {title} — {company}" if company else f"[j{i}] {title}")
+
+    headline_lines: list[str] = []
+    for i, h in enumerate(headlines[:20]):
+        title = (h.get("title") or "").strip()
+        if title:
+            headline_lines.append(f"[h{i}] {title}")
+
+    if not job_lines and not headline_lines:
+        return None
+
+    # Company-centric prompt: one entry per unique company, not per pain category.
+    # This maps 1:1 to the frontend's Target Companies table — each OpportunityItem
+    # surfaces exactly one company so there are no duplicates and no category grouping.
+    prompt = f"""You are a market intelligence analyst.
+
+City: {city}
+Industry: {industry}
+
+Job postings (index → title — company):
+{chr(10).join(job_lines) or "(none)"}
+
+News headlines (index → title):
+{chr(10).join(headline_lines) or "(none)"}
+
+For each UNIQUE company in the job postings above, identify:
+1. What pain or pressure they are signalling through their hiring activity.
+2. The job posting indices that belong to this company.
+3. A one-line pitch for what product or service to offer them.
+
+Return the top 10 companies ranked by hiring urgency (most roles / most urgent pain first).
+
+Return ONLY a valid JSON object — no markdown fences, no explanation:
+{{
+  "companies": [
+    {{
+      "company": "Exact Company Name",
+      "pain": "short pain category label",
+      "job_indices": ["j0", "j2"],
+      "pitch": "one-line pitch"
+    }}
+  ]
+}}"""
+
+    try:
+        client = Groq(api_key=api_key)
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+        )
+        raw = (response.choices[0].message.content or "").strip()
+    except Exception as exc:
+        _log.warning("Groq strategy call failed: %s", exc)
+        return None
+
+    # Strip markdown fences if the model adds them despite instructions.
+    if raw.startswith("```"):
+        raw = re.sub(r"^```[a-zA-Z]*\n?", "", raw)
+        raw = re.sub(r"\n?```$", "", raw.strip())
+
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        _log.warning("Groq strategy response not valid JSON: %s | raw=%r", exc, raw[:200])
+        return None
+
+    raw_companies = parsed.get("companies") or []
+    if not raw_companies or not isinstance(raw_companies, list):
+        return None
+
+    # Build index → (EvidenceItem, job_dict) lookups to resolve [j0] references.
+    job_index: dict[str, tuple[EvidenceItem, dict]] = {}
+    for i, j in enumerate(jobs[:40]):
+        title = (j.get("title") or "").strip()
+        link = (j.get("link") or "#").strip()
+        if title:
+            job_index[f"j{i}"] = (EvidenceItem(title=title, link=link, source="job"), j)
+
+    # Also build a company-name → [job_index_key] reverse map so we can
+    # fall back to matching by company name when Groq omits job_indices.
+    company_to_keys: dict[str, list[str]] = {}
+    for key, (_, jdict) in job_index.items():
+        cname = (jdict.get("company") or "").strip().lower()
+        if cname:
+            company_to_keys.setdefault(cname, []).append(key)
+
+    signals_used = _compute_signals_used(headlines, jobs)
+    data_quality = _compute_data_quality(headlines, jobs, signals_used)
+    template = get_template(industry)
+    _total_signals = len(headlines) + len(jobs)
+
+    opportunity_items: list[OpportunityItem] = []
+    used_companies: set[str] = set()
+
+    for raw_co in raw_companies[:10]:
+        company_name = (raw_co.get("company") or "").strip()
+        pain_label = (raw_co.get("pain") or "").strip() or f"{industry} hiring pressure"
+        pitch = (raw_co.get("pitch") or "").strip()
+        job_indices: list[str] = [
+            str(s).strip() for s in (raw_co.get("job_indices") or [])
+        ]
+
+        if not company_name or company_name.lower() in used_companies:
+            continue
+        used_companies.add(company_name.lower())
+
+        # Resolve job indices → EvidenceItems; fall back to company-name match.
+        evidence: list[EvidenceItem] = []
+        seen_links: set[str] = set()
+        for idx_key in job_indices:
+            if idx_key in job_index:
+                ev, _ = job_index[idx_key]
+                if ev.link not in seen_links:
+                    evidence.append(ev)
+                    seen_links.add(ev.link)
+        if not evidence:
+            for idx_key in company_to_keys.get(company_name.lower(), []):
+                ev, _ = job_index[idx_key]
+                if ev.link not in seen_links:
+                    evidence.append(ev)
+                    seen_links.add(ev.link)
+        if not evidence:
+            if job_index:
+                ev, _ = next(iter(job_index.values()))
+                evidence.append(ev)
+            else:
+                evidence = [EvidenceItem(title=f"{company_name} — {industry}", link="#", source="job")]
+
+        # Scores — same transparent formulas as the keyword path.
+        n_ev = len(evidence)
+        has_headline = any(e.source == "headline" for e in evidence)
+        has_job = any(e.source == "job" for e in evidence)
+        n_job_ev = sum(1 for e in evidence if e.source == "job")
+
+        raw_freq = min(1.0, n_ev / 5.0)
+        raw_div = 0.5 if (has_headline and has_job) else (0.25 if (has_headline or has_job) else 0.0)
+        raw_div_n = raw_div * 2.0
+        raw_job_r = (n_job_ev / n_ev) if n_ev else 0.0
+        weighted = _W_FREQ * raw_freq + _W_DIV * raw_div_n + _W_JOB * raw_job_r
+        pain_score = min(10.0, round(2.0 + 8.0 * weighted, 1))
+
+        sb_sf = round(min(1.0, n_ev / _total_signals) if _total_signals > 0 else 0.0, 3)
+        sb_sd = round(1.0 if (has_headline and has_job) else (0.5 if (has_headline or has_job) else 0.0), 3)
+        sb_jr = round(n_job_ev / n_ev if n_ev > 0 else 0.0, 3)
+        sb = ScoreBreakdown(signal_frequency=sb_sf, source_diversity=sb_sd, job_role_density=sb_jr)
+
+        ai_cat = _bottleneck_to_ai_category(pain_label, template)
+        opp_jobs = [job_index[k][1] for k in job_indices if k in job_index]
+        roi_signal = _roi_signal_from_jobs(opp_jobs if opp_jobs else jobs[:5], n_job_ev)
+        automation = _automation_potential_from_tag(pain_label, " ".join(e.title for e in evidence))
+        support_level = _classify_support_level(n_ev, has_headline, has_job, None, len(set(
+            e.link for e in evidence if e.link != "#"
+        )), is_padded=False)
+        confidence = _confidence_single(n_ev, has_headline, has_job, None, n_ev)
+        trend_key = _make_trend_key(pain_label, ai_cat, is_padded=False)
+        recommendation = _classify_recommendation(support_level, confidence, pain_score, False, None)
+        opp_type = _classify_opportunity_type(ai_cat)
+        brief = _build_opportunity_brief(
+            title=company_name,
+            ai_category=ai_cat,
+            pain_score=pain_score,
+            evidence=evidence,
+            industry=industry,
+        )
+        actions = _build_suggested_actions(
+            problem=pain_label,
+            opportunity_type=opp_type,
+            recommendation=recommendation,
+            support_level=support_level,
+            trend_key=trend_key,
+        )
+
+        # One lead per opportunity = the company itself, always signal_type="job".
+        job_title_ref = evidence[0].title[:80] if evidence else ""
+        lead_obj = Lead(
+            company_name=company_name,
+            reason=f"Hiring for '{job_title_ref}'" if job_title_ref else f"Active {industry} employer",
+            signal_type="job",
+            signal_reference=job_title_ref or company_name[:80],
+            priority_score=round(min(10.0, 2.0 + n_ev * 0.8), 2),
+        )
+
+        opportunity_items.append(OpportunityItem(
+            title=company_name[:50],
+            problem=pain_label,
+            ai_category=ai_cat,
+            evidence=evidence[:5],
+            pain_score=pain_score,
+            automation_potential=automation,
+            roi_signal=roi_signal,
+            confidence=confidence,
+            business_case=BusinessCase(
+                savings_range_annual="$50k–$200k",
+                assumptions=[
+                    pitch or f"Active {industry} employer — {pain_label}",
+                    "Adjust with local cost data when available",
+                ],
+            ),
+            score_breakdown=sb,
+            brief=brief,
+            support_level=support_level,
+            signal_age_days_avg=None,
+            unique_sources_count=len(set(e.link for e in evidence if e.link != "#")),
+            is_padded=False,
+            trend_key=trend_key,
+            recommendation=recommendation,
+            opportunity_type=opp_type,
+            suggested_actions=actions,
+            leads=[lead_obj],
+        ))
+
+    if not opportunity_items:
+        return None
+
+    # Pad to 5 using the keyword/template path if Groq gave fewer than 5 opportunities.
+    if len(opportunity_items) < 5:
+        keyword_opps = _build_opportunity_map(headlines, jobs, industry, city, template)
+        for ko in keyword_opps:
+            if ko.problem.lower() not in {o.problem.lower() for o in opportunity_items}:
+                opportunity_items.append(ko)
+            if len(opportunity_items) >= 5:
+                break
+
+    opportunity_items = opportunity_items[:10]
+    opportunity_items.sort(key=lambda o: (-(o.pain_score + o.roi_signal) / 2.0, -o.confidence))
+
+    _log.info(
+        "Groq strategy: city=%r industry=%r opportunities=%d",
+        city, industry, len(opportunity_items),
+    )
+    return StrategyOutput(
+        strategy_version=STRATEGY_VERSION,
+        city=city,
+        industry=industry,
+        opportunity_map=opportunity_items,
+        signals_used=signals_used,
+        data_quality=data_quality,
+    )
+
+
 def _call_openai_for_strategy(
     headlines: list[dict[str, Any]],
     industry: str,
@@ -1249,7 +1541,7 @@ def _call_openai_for_strategy(
 Produce a strategy as a single valid JSON object matching this schema (v2.0). Return only the JSON, no markdown.
 Schema: {json.dumps(schema)}
 
-Required: strategy_version "2.0", city, industry, opportunity_map (5-8 items), signals_used (headlines_count, jobs_count, news_sources_count, job_companies_count), data_quality (freshness_window_days, coverage_score, source_mix_score).
+Required: strategy_version "2.0", city, industry, opportunity_map (5-10 items), signals_used (headlines_count, jobs_count, news_sources_count, job_companies_count), data_quality (freshness_window_days, coverage_score, source_mix_score).
 Each opportunity: title, problem, ai_category (from schema enum), evidence (list of {{title, link, source: "headline"|"job"}} - only use titles/links from the provided headlines and jobs), pain_score 0-10, automation_potential 0-10, roi_signal 0-10, confidence 0-1, business_case (savings_range_annual string, assumptions array)."""
 
         response = client.chat.completions.create(
@@ -1296,6 +1588,11 @@ def generate_strategy(
         mode = get_strategy_mode()
         force_mock = mode == "mock"
     if not force_mock:
+        # Groq is the primary AI path (free tier, fast, no quota issues).
+        result = _call_groq_for_strategy(headlines, industry, city, jobs=jobs)
+        if result is not None:
+            return result
+        # OpenAI is the secondary AI path (requires OPENAI_API_KEY).
         result = _call_openai_for_strategy(
             headlines, industry, city, jobs=jobs, objective=objective, location=location
         )

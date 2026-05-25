@@ -80,8 +80,13 @@ def get_db_path() -> Path:
     return get_cache_dir() / "marketscout.db"
 
 
+def get_groq_key() -> str:
+    """Groq API key for NL2SQL. Set via GROQ_API_KEY."""
+    return (os.environ.get("GROQ_API_KEY") or "").strip()
+
+
 def get_google_api_key() -> str:
-    """Gemini API key for NL2SQL. Set via GOOGLE_API_KEY."""
+    """Legacy Gemini API key (kept for backward compatibility). Set via GOOGLE_API_KEY."""
     return (os.environ.get("GOOGLE_API_KEY") or "").strip()
 
 
@@ -98,16 +103,3 @@ def get_newsapi_key() -> str:
 def get_crunchbase_key() -> str:
     """Crunchbase Basic API user key for funding-round search. Set via CRUNCHBASE_KEY."""
     return (os.environ.get("CRUNCHBASE_KEY") or "").strip()
-
-
-def get_smtp_config() -> dict:
-    """SMTP credentials for email briefings. Returns dict with None values for unset keys.
-
-    Keys: smtp_user, smtp_app_password, briefing_recipient.
-    All three must be non-None to send email.
-    """
-    return {
-        "smtp_user": os.environ.get("SMTP_USER") or None,
-        "smtp_app_password": os.environ.get("SMTP_APP_PASSWORD") or None,
-        "briefing_recipient": os.environ.get("BRIEFING_RECIPIENT") or None,
-    }

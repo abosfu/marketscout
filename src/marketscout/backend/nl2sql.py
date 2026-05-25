@@ -1,26 +1,29 @@
 """NL2SQL router: translate natural-language questions into SQL queries and insights.
 
-GOOGLE_API_KEY is resolved from the environment at request time (populated by
+GROQ_API_KEY is resolved from the environment at request time (populated by
 config.load_dotenv() which runs when the marketscout.config module is first imported).
 The database path is resolved via get_db_path() — the live SQLite file written by
 `marketscout run`. There is no sample/mock fallback in this module.
 
-
 Pipeline (per request):
-  1. User question → LangChain create_sql_query_chain → raw SQL
-  2. Safety check: reject DROP / DELETE / UPDATE / INSERT
-  3. Execute SQL against a READ-ONLY SQLite connection
-  4. Second Gemini call: raw rows → plain-English business insight
-  5. Return { sql_query, insights }
+  1. Build schema context from read-only SQLite + Gold-layer hints
+  2. User question → Groq chat completion (llama-3.1-8b-instant) → SQL text
+  3. Safety check: reject DROP / DELETE / UPDATE / INSERT
+  4. Execute SQL against a READ-ONLY SQLite connection
+  5. Second Groq call: raw rows → plain-English business insight
 
-All LangChain/Gemini imports are lazy (inside helper functions) so the module
-loads cleanly in tests without the real packages being present.
+Groq calls run inside ``ThreadPoolExecutor`` with a hard timeout so hung HTTP
+requests cannot block the server indefinitely. All Groq failures surface as
+HTTP 503 with ``Groq API unavailable — check GROQ_API_KEY``.
 """
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -31,7 +34,7 @@ router = APIRouter()
 # Keywords that must never appear in AI-generated SQL.
 _UNSAFE_KEYWORDS: frozenset[str] = frozenset({"DROP", "DELETE", "UPDATE", "INSERT"})
 
-# Extra schema context for Gemini (dim_signals company-level fields).
+# Extra schema context for the LLM (dim_signals company-level fields).
 _GOLD_SCHEMA_HINT = """
 MarketScout Gold layer (SQLite) — use these tables for company and hiring questions:
 
@@ -49,6 +52,10 @@ signal_type = 'job' AND company_name LIKE '%Company%' (case-insensitive) and ret
 For news about a company, use signal_type = 'news' and filter title or company_name.
 Always filter by the latest run_id when the user refers to the current search.
 """
+
+_GROQ_MODEL = "llama-3.1-8b-instant"
+_GROQ_TIMEOUT_SEC = 20.0
+_GROQ_UNAVAILABLE_MSG = "Groq API unavailable — check GROQ_API_KEY"
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
@@ -83,71 +90,161 @@ def _check_safety(sql: str) -> None:
             )
 
 
-def _make_readonly_db(db_path: str):
-    """
-    Return a LangChain SQLDatabase backed by a READ-ONLY SQLite connection.
-    Uses sqlite3's URI mode (?mode=ro) so the engine can never mutate data.
-    sample_rows_in_table_info=3 gives the LLM concrete examples of the data
-    shape without exposing the full table.
-    """
-    from sqlalchemy import create_engine
-    from langchain_community.utilities import SQLDatabase
+def _sqlite_schema_context(db_path: str) -> str:
+    """DDL + small samples from the read-only Gold DB for the SQL-generation prompt."""
+    path = str(Path(db_path).resolve())
+    uri = f"file:{path}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        tables = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+        ).fetchall()
+        chunks: list[str] = []
+        for (tname,) in tables:
+            row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+                (tname,),
+            ).fetchone()
+            if row and row[0]:
+                chunks.append(row[0] + ";")
+            try:
+                cur = conn.execute(f'SELECT * FROM "{tname}" LIMIT 3')
+                cols = [d[0] for d in cur.description] if cur.description else []
+                samples = cur.fetchall()
+                chunks.append(
+                    f"-- Sample rows for {tname} (columns={cols}): {samples!r}"
+                )
+            except sqlite3.Error:
+                pass
+        return "\n\n".join(chunks) if chunks else "(empty database)"
+    finally:
+        conn.close()
 
-    def _creator() -> sqlite3.Connection:
-        return sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
 
-    engine = create_engine("sqlite://", creator=_creator)
-    return SQLDatabase(engine, sample_rows_in_table_info=3)
+def _extract_sql_from_model_output(raw: str) -> str:
+    """Pull a single SQL statement from model output (strip markdown fences)."""
+    text = raw.strip()
+    m = re.search(r"```(?:sql)?\s*([\s\S]*?)```", text, re.IGNORECASE)
+    if m:
+        text = m.group(1).strip()
+    # Drop leading comment-only lines
+    lines_out: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("--"):
+            continue
+        lines_out.append(line)
+    return "\n".join(lines_out).strip()
+
+
+def _groq_generate_blocking(prompt: str, api_key: str) -> str:
+    """Synchronous Groq chat completion (runs inside executor worker thread)."""
+    from groq import Groq
+
+    client = Groq(api_key=api_key)
+    response = client.chat.completions.create(
+        model=_GROQ_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.0,
+    )
+    try:
+        text = (response.choices[0].message.content or "").strip()
+    except (AttributeError, IndexError, TypeError):
+        text = ""
+    if not text:
+        raise ValueError("Empty or blocked Groq response")
+    return text
+
+
+def _groq_generate(prompt: str, api_key: str) -> str:
+    """Call Groq with a hard wall-clock timeout (never blocks past ``_GROQ_TIMEOUT_SEC``)."""
+    try:
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            fut = ex.submit(_groq_generate_blocking, prompt, api_key)
+            return fut.result(timeout=_GROQ_TIMEOUT_SEC)
+    except FutureTimeoutError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=_GROQ_UNAVAILABLE_MSG,
+        ) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=_GROQ_UNAVAILABLE_MSG,
+        ) from exc
+
+
+def _run_readonly_sql(db_path: str, sql: str) -> str:
+    """Execute read-only SELECT and return JSON-serialised preview."""
+    path = str(Path(db_path).resolve())
+    uri = f"file:{path}?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    try:
+        cur = conn.execute(sql)
+        rows = cur.fetchall()
+        cols = [d[0] for d in cur.description] if cur.description else []
+        preview = rows[:500]
+        return json.dumps(
+            {"columns": cols, "row_count": len(rows), "rows": preview},
+            default=str,
+        )
+    finally:
+        conn.close()
 
 
 def _run_nl2sql_pipeline(question: str, db_path: str, api_key: str) -> tuple[str, str]:
     """
     Core NL2SQL pipeline. Isolated into its own function so tests can
     monkeypatch `marketscout.backend.nl2sql._run_nl2sql_pipeline` without
-    needing real LangChain/Gemini packages installed.
+    needing the groq SDK installed.
 
     Returns:
         (sql_query, insights) — both are non-empty strings.
     """
-    from langchain.chains import create_sql_query_chain
-    from langchain_core.messages import HumanMessage
-    from langchain_google_genai import ChatGoogleGenerativeAI
+    schema_ctx = _sqlite_schema_context(db_path)
 
-    db = _make_readonly_db(db_path)
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-1.5-pro-latest",
-        google_api_key=api_key,
-        temperature=0,
+    sql_prompt = (
+        "You are an expert SQLite analyst for MarketScout. "
+        "Answer the user with exactly one read-only query.\n\n"
+        "Rules:\n"
+        "- Output a single SELECT (or WITH … SELECT) statement only.\n"
+        "- Valid SQLite 3 syntax. You may use LIKE, LIMIT, ORDER BY.\n"
+        "- Optionally wrap the SQL in a ```sql fenced code block; otherwise plain SQL only.\n"
+        "- No explanation, no commentary outside the query.\n\n"
+        f"--- DATABASE SCHEMA ---\n{schema_ctx}\n\n"
+        f"{_GOLD_SCHEMA_HINT.strip()}\n\n"
+        f"User question: {question.strip()}\n"
     )
 
-    # Step 1 — generate SQL (schema hint includes company_name / signal_type on dim_signals)
-    chain = create_sql_query_chain(llm, db)
-    question_with_schema = f"{_GOLD_SCHEMA_HINT.strip()}\n\nUser question: {question}"
-    sql_query: str = chain.invoke({"question": question_with_schema}).strip()
+    sql_raw = _groq_generate(sql_prompt, api_key)
+    sql_query = _extract_sql_from_model_output(sql_raw)
+    if not sql_query:
+        raise HTTPException(
+            status_code=503,
+            detail=_GROQ_UNAVAILABLE_MSG,
+        )
 
-    # Step 2 — safety gate (raises HTTP 400 on violation)
     _check_safety(sql_query)
 
-    # Step 3 — execute against the read-only database
     try:
-        raw_results: str = db.run(sql_query)
+        raw_results = _run_readonly_sql(db_path, sql_query)
     except Exception as exc:
         raise HTTPException(
             status_code=500,
             detail=f"SQL execution failed: {exc}",
         ) from exc
 
-    # Step 4 — synthesise a plain-English insight
     synthesis_prompt = (
         f"Original question: {question}\n\n"
         f"SQL query used: {sql_query}\n\n"
-        f"Raw query results: {raw_results}\n\n"
+        f"Raw query results (JSON): {raw_results}\n\n"
         "Synthesize these data rows into a clear, one-paragraph business insight "
         "for a product manager. Focus on what the numbers mean, not how they were retrieved."
     )
-    synthesis_response = llm.invoke([HumanMessage(content=synthesis_prompt)])
-    insights: str = synthesis_response.content
-
+    insights = _groq_generate(synthesis_prompt, api_key)
     return sql_query, insights
 
 
@@ -159,16 +256,16 @@ def ask(request: QueryRequest) -> QueryResponse:
     Accept a natural-language question, run the NL2SQL pipeline, and return
     the generated SQL query together with a plain-English business insight.
 
-    Requires the GOOGLE_API_KEY environment variable.
+    Requires the GROQ_API_KEY environment variable.
     The target database must exist (run `marketscout run` first).
     """
     # ── pre-flight checks ────────────────────────────────────────────────────
-    api_key = os.environ.get("GOOGLE_API_KEY", "").strip()
+    api_key = os.environ.get("GROQ_API_KEY", "").strip()
     if not api_key:
         raise HTTPException(
             status_code=503,
             detail=(
-                "GOOGLE_API_KEY is not configured. "
+                "GROQ_API_KEY is not configured. "
                 "Set the environment variable to enable NL2SQL."
             ),
         )

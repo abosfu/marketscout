@@ -1,6 +1,6 @@
 """API tests: root health check and NL2SQL /api/ask endpoint.
 
-All LangChain/Gemini calls are monkeypatched so no real API key or database
+All Groq / NL2SQL calls are monkeypatched so no real API key or database
 is required during CI.  The internal helper `_run_nl2sql_pipeline` is the
 single patch point for the happy-path tests; other tests exercise the
 pre-flight guard logic without touching the pipeline at all.
@@ -48,18 +48,18 @@ def test_root_returns_running_status() -> None:
 # ── Pre-flight guards (no pipeline needed) ────────────────────────────────────
 
 def test_ask_returns_503_when_api_key_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    """POST /api/ask returns 503 when GOOGLE_API_KEY is not set."""
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    """POST /api/ask returns 503 when GROQ_API_KEY is not set."""
+    monkeypatch.delenv("GROQ_API_KEY", raising=False)
     response = _ask()
     assert response.status_code == 503
-    assert "GOOGLE_API_KEY" in response.json()["detail"]
+    assert "GROQ_API_KEY" in response.json()["detail"]
 
 
 def test_ask_returns_500_when_database_missing(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """POST /api/ask returns 500 when the SQLite database does not exist."""
-    monkeypatch.setenv("GOOGLE_API_KEY", "fake-key-for-test")
+    monkeypatch.setenv("GROQ_API_KEY", "fake-key-for-test")
     # The endpoint imports get_db_path from marketscout.config at call time.
     missing_db = tmp_path / "nonexistent.db"
     with patch("marketscout.config.get_db_path", return_value=missing_db):
@@ -74,7 +74,7 @@ def test_ask_returns_sql_and_insights_when_pipeline_mocked(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """POST /api/ask returns 200 with sql_query and insights when the pipeline is mocked."""
-    monkeypatch.setenv("GOOGLE_API_KEY", "fake-key-for-test")
+    monkeypatch.setenv("GROQ_API_KEY", "fake-key-for-test")
     fake_db = tmp_path / "marketscout.db"
     fake_db.touch()  # file must exist for the pre-flight check
 
@@ -97,7 +97,7 @@ def test_ask_response_contains_select_and_non_empty_insights(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """sql_query contains SELECT and insights is a non-empty string."""
-    monkeypatch.setenv("GOOGLE_API_KEY", "fake-key-for-test")
+    monkeypatch.setenv("GROQ_API_KEY", "fake-key-for-test")
     fake_db = tmp_path / "marketscout.db"
     fake_db.touch()
 
@@ -145,7 +145,7 @@ def test_ask_returns_400_when_pipeline_returns_unsafe_sql(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """POST /api/ask returns 400 if the LLM somehow generates a DROP statement."""
-    monkeypatch.setenv("GOOGLE_API_KEY", "fake-key-for-test")
+    monkeypatch.setenv("GROQ_API_KEY", "fake-key-for-test")
     fake_db = tmp_path / "marketscout.db"
     fake_db.touch()
 
@@ -169,7 +169,7 @@ def test_ask_returns_500_when_pipeline_raises_unexpected_error(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """POST /api/ask wraps unexpected pipeline exceptions in a 500 response."""
-    monkeypatch.setenv("GOOGLE_API_KEY", "fake-key-for-test")
+    monkeypatch.setenv("GROQ_API_KEY", "fake-key-for-test")
     fake_db = tmp_path / "marketscout.db"
     fake_db.touch()
 

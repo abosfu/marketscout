@@ -62,26 +62,3 @@ async def test_ask_returns_503_when_db_missing(tmp_path: Path, monkeypatch: pyte
     assert "search" in response.json()["detail"].lower()
 
 
-async def test_email_with_no_smtp_config_returns_sent_false(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """POST /email returns 200 with sent=False when SMTP env vars are not set."""
-    monkeypatch.delenv("SMTP_USER", raising=False)
-    monkeypatch.delenv("SMTP_APP_PASSWORD", raising=False)
-    monkeypatch.delenv("BRIEFING_RECIPIENT", raising=False)
-
-    async with httpx.AsyncClient(transport=_TRANSPORT, base_url=_BASE) as ac:
-        response = await ac.post(
-            "/email",
-            json={
-                "run_id": 123,
-                "opportunities": [],
-                "city": "Vancouver",
-                "industry": "Construction",
-            },
-        )
-
-    assert response.status_code == 200
-    data = response.json()
-    assert data["sent"] is False
-    assert len(data["detail"]) > 0
