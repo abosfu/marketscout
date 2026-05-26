@@ -22,6 +22,29 @@ from .base import JobItem, JobsProvider
 logger = logging.getLogger(__name__)
 
 SERPAPI_URL = "https://serpapi.com/search.json"
+
+# News publishers that sometimes leak into Google Jobs results.
+_NEWS_PUBLISHERS = (
+    "daily hive", "narcity", "604 now", "vancouver sun",
+    "cbc", "ctv", "globe and mail", "national post", "chron",
+    "baking business", "law.com", "island social trends",
+)
+
+
+def _is_valid_job_title(title: str) -> bool:
+    """Return False for titles that look like news headlines, not job postings."""
+    if not title:
+        return False
+    if "://" in title:
+        return False
+    if len(title) > 120:
+        return False
+    t_lower = title.lower()
+    for pub in _NEWS_PUBLISHERS:
+        # Matches patterns like "Some Headline - Daily Hive" or "Story - CBC News"
+        if f" - {pub}" in t_lower:
+            return False
+    return True
 REQUEST_TIMEOUT = 15
 
 # Default fetch volume — paginates up to ~5 pages × 10 results.
@@ -148,6 +171,12 @@ class SerpApiJobsProvider(JobsProvider):
         # Surface only the first-page failure — partial paginated results are fine.
         if not jobs and first_call_error is not None:
             raise first_call_error
+
+        before_filter = len(jobs)
+        jobs = [j for j in jobs if _is_valid_job_title(j.get("title") or "")]
+        dropped = before_filter - len(jobs)
+        if dropped:
+            logger.info("SerpAPI dropped %d non-job titles (news/URL/too-long)", dropped)
 
         filled = sum(1 for j in jobs if (j.get("company") or "").strip())
         blanks = len(jobs) - filled

@@ -206,7 +206,9 @@ def write_gold(
                     source = (sig.get("source") or "").strip()
                     summary = (sig.get("company") or sig.get("source") or "").strip()
                     company_name = (sig.get("company") or "").strip() or None
-                    signal_type = _signal_type_from_source(source)
+                    # Prefer the explicit signal_type set by _normalize_signals_for_gold;
+                    # fall back to source-string inference for signals from older code paths.
+                    signal_type = (sig.get("signal_type") or "").strip() or _signal_type_from_source(source)
                     ds = DimSignal(
                         run_id=run_id,
                         source=source,

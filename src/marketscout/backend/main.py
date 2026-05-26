@@ -63,17 +63,25 @@ def _normalize_signals_for_gold(
     headlines: list[dict[str, Any]],
     jobs: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Ensure each signal dict has company, source, and run_id for Gold layer writes."""
+    """Prepare signals for Gold layer writes.
+
+    Explicitly tags every headline as signal_type='news' and every job as
+    signal_type='job' so write_gold() does not have to infer the type from
+    the source string.  This makes classification robust to any provider whose
+    source label is not 'google_jobs' or 'adzuna'.
+    """
     out: list[dict[str, Any]] = []
     for h in headlines:
         sig = dict(h)
         sig["company"] = (sig.get("company") or "").strip()
         sig["source"] = (sig.get("source") or "newsapi").strip()
+        sig["signal_type"] = "news"
         out.append(sig)
     for j in jobs:
         sig = dict(j)
         sig["company"] = (sig.get("company") or "").strip()
         sig["source"] = (sig.get("source") or "").strip()
+        sig["signal_type"] = "job"
         out.append(sig)
     return out
 
@@ -121,14 +129,52 @@ def _dedupe_jobs_by_company(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+# Maps vague industry inputs to job-board search terms that actually return results.
+# Keys are lowercase; matching is case-insensitive against the normalised industry string.
+_INDUSTRY_SEARCH_TERM: dict[str, str] = {
+    "project management": "project manager",
+    "human resources": "HR manager",
+    "information technology": "software engineer",
+    "it": "software engineer",
+    "business development": "business development manager",
+    "marketing": "marketing manager",
+    "finance": "financial analyst",
+    "accounting": "accountant",
+    "sales": "sales representative",
+    "customer service": "customer service representative",
+    "supply chain": "supply chain manager",
+    "operations": "operations manager",
+    "data science": "data scientist",
+    "data analytics": "data analyst",
+    "product management": "product manager",
+    "legal": "lawyer",
+    "procurement": "procurement manager",
+    "administration": "administrative assistant",
+}
+
+
+def _job_search_term(industry: str) -> str:
+    """Return a job-board-friendly search term for the given industry input.
+
+    Vague category names like "Project Management" map to concrete job titles
+    (e.g. "project manager") so SerpAPI returns relevant postings.  Unknown
+    industries fall back to the raw industry string unchanged.
+    """
+    return _INDUSTRY_SEARCH_TERM.get((industry or "").strip().lower(), (industry or "").strip())
+
+
 def _fetch_jobs_dual_query(
     city: str, industry: str, per_query_limit: int
 ) -> list[dict[str, Any]]:
     """
     When SerpAPI is configured, fetch jobs via TWO queries and combine.
 
-        Query 1: ``"{industry} jobs {city}"``  (canonical)
-        Query 2: ``"{industry} hiring {city}"`` (boosts intent-signal coverage)
+        Query 1: ``"{search_term} jobs {city}"``   (canonical job-title form)
+        Query 2: ``"{search_term} hiring {city}"`` (boosts intent-signal coverage)
+
+    ``search_term`` is derived from ``industry`` via ``_job_search_term()`` so
+    that vague inputs like "Project Management" are translated to concrete job
+    titles ("project manager") that actually appear on Google Jobs.
 
     Results are combined and deduplicated by (title, company). When SerpAPI is
     not configured (no ``SERPAPI_KEY``) we fall back to the existing ``fetch_jobs``
@@ -143,7 +189,14 @@ def _fetch_jobs_dual_query(
         try:
             provider = SerpApiJobsProvider()
             city_q = (city or "").strip()
-            industry_q = (industry or "").strip()
+            search_term = _job_search_term(industry)
+            industry_q = search_term  # use translated term for query strings
+            if search_term != (industry or "").strip():
+                logger.info(
+                    "Industry search term normalised: %r → %r",
+                    industry,
+                    search_term,
+                )
             q1 = f"{industry_q} jobs {city_q}".strip() or "jobs"
             q2 = f"{industry_q} hiring {city_q}".strip() or "hiring"
             jobs_q1 = provider.fetch_jobs(
@@ -208,20 +261,26 @@ def _execute_search_pipeline(
     headlines = fetch_headlines(
         city=city, industry=industry, limit=headlines_fetch_limit
     )
-    jobs = _fetch_jobs_dual_query(
+    # jobs_all: title+company deduped (already done inside _fetch_jobs_dual_query)
+    # — retains ALL unique job postings so the Gold DB can answer
+    #   "what roles is Company X hiring for?" with multiple titles.
+    jobs_all = _fetch_jobs_dual_query(
         city=city, industry=industry, per_query_limit=jobs_per_query_limit
     )
 
-    # Company-level dedupe — keep the first job per company so the table
-    # surfaces unique companies, not the same employer repeated across roles.
-    jobs = _dedupe_jobs_by_company(jobs)
+    # Company-level dedupe for strategy scoring and frontend opportunity table —
+    # one representative job per employer so no single company dominates scores.
+    jobs = _dedupe_jobs_by_company(jobs_all)
+
     unique_companies = {
         (j.get("company") or "").strip().lower()
-        for j in jobs
+        for j in jobs_all
         if (j.get("company") or "").strip()
     }
     logger.info(
-        "Search pipeline: %d jobs after dedupe, %d unique companies, %d headlines",
+        "Search pipeline: %d total jobs, %d after company dedupe, "
+        "%d unique companies, %d headlines",
+        len(jobs_all),
         len(jobs),
         len(unique_companies),
         len(headlines),
@@ -229,15 +288,20 @@ def _execute_search_pipeline(
 
     # Tag every raw signal with the current run_id so downstream consumers
     # (Gold layer + frontend) can filter cleanly and never bleed across runs.
-    for j in jobs:
+    # Stamp jobs_all first; jobs shares the same dict objects so they get
+    # stamped too.
+    for j in jobs_all:
         if isinstance(j, dict):
             j["run_id"] = run_id
     for h in headlines:
         if isinstance(h, dict):
             h["run_id"] = run_id
 
+    # Strategy uses company-deduped list (one signal per employer).
     strategy = generate_strategy(headlines, industry=industry, city=city, jobs=jobs)
-    signals = _normalize_signals_for_gold(headlines, jobs)
+
+    # Gold DB receives ALL unique job postings so NL2SQL has full hiring detail.
+    signals = _normalize_signals_for_gold(headlines, jobs_all)
     db_path = get_db_path()
     init_db(db_path)
     write_gold(
@@ -252,7 +316,7 @@ def _execute_search_pipeline(
         run_id,
         strategy.to_json_dict()["opportunity_map"],
         len(signals),
-        jobs,
+        jobs_all,   # return full job list so frontend can show all titles per company
         headlines,
     )
 
@@ -322,11 +386,14 @@ def ask_nl2sql(body: AskRequest) -> dict:
             question=body.question,
             db_path=str(db_path),
             api_key=api_key,
+            run_id=body.run_id,
         )
         return {"sql_query": sql_query, "insights": insights}
     except HTTPException:
         raise
     except Exception as exc:
+        import traceback as _tb
+        logger.error("NL2SQL pipeline error:\n%s", _tb.format_exc())
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 

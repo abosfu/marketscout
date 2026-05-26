@@ -134,12 +134,12 @@ html, body, [class*="st-"] {
     letter-spacing: 0.2em;
     text-transform: uppercase;
     color: #AAAAAA;
-    padding: 0 2rem 0.75rem 0;
+    padding: 0 2rem 0.75rem 1rem;
     text-align: left;
     border-bottom: 1px solid #000000;
 }
 .ms-table td {
-    padding: 0.85rem 2rem 0.85rem 0;
+    padding: 0.85rem 2rem 0.85rem 1rem;
     border-bottom: 1px solid #E8E8E8;
     font-size: 13px;
     color: #0A0A0A;
