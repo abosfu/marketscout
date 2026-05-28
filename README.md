@@ -1,142 +1,103 @@
 # MarketScout
 
-A local market intelligence tool that takes a city and industry as input, runs a live signal pipeline, and returns a scored opportunity map you can query in plain English.
+A live market intelligence system that surfaces real B2B targets from Google Jobs and news data — showing which companies are hiring, what pain they're signaling, and what to pitch them.
 
 ## What It Does
 
-- **Input**: a city and an industry (e.g. Vancouver, Construction)
-- **Pipeline**: fetches live headlines and job postings, scores opportunities using pain/ROI signals, persists results to a SQLite Gold layer
-- **Output**: a ranked opportunity table in the Streamlit dashboard, an NL2SQL chat interface for ad-hoc queries, and an email briefing on demand
+The user types any city and any industry. The system fetches live job postings from Google Jobs via SerpAPI and industry news via NewsAPI in real time. A Groq LLM reads the actual signals and derives pain categories, opportunity scores, and pitch recommendations per company. A plain-English chat lets users query the run's data without writing SQL.
 
-## Stack
+## Architecture
 
-| Component | Technology |
-|-----------|-----------|
-| Pipeline | Python, Google News RSS, Adzuna Jobs API |
-| Database | SQLite, SQLAlchemy 2.0 (Medallion star schema) |
-| Backend | FastAPI, Pydantic v2, uvicorn |
-| AI / NL2SQL | LangChain, Google Gemini (`gemini-1.5-pro-latest`) |
-| Frontend | Streamlit |
-| Email | smtplib, Gmail SMTP / STARTTLS |
+Medallion pipeline:
 
-## Quick Start
+- **Bronze** — raw job postings (SerpAPI dual-query) and headlines (NewsAPI)
+- **Silver** — deduplicated, validated, run-stamped signals
+- **Gold** — SQLite star schema (`dim_runs`, `dim_signals`, `dim_opportunities`, `fact_leads`)
 
-1. **Clone and enter the repo**
-   ```bash
-   git clone https://github.com/your-username/marketscout.git
-   cd marketscout
-   ```
+FastAPI backend — `/search` and `/ask` endpoints
+Streamlit frontend — clean monospace dashboard
+Groq — powers both strategy generation and NL2SQL
+SQLite — persistent Gold DB per run
 
-2. **Create and activate a virtual environment**
-   ```bash
-   python -m venv .venv && source .venv/bin/activate
-   ```
+## Features
 
-3. **Install the package**
-   ```bash
-   pip install -e .
-   ```
+- Any city, any industry — no hardcoded templates
+- 10 target companies per search ranked by hiring urgency
+- Company intelligence: what they're hiring for, what to pitch
+- Market context: real industry-specific headlines
+- NL2SQL chat: ask plain English questions about the current run
+- Read-only DB safety: SQL blocklist + read-only SQLite URI
 
-4. **Configure environment variables**
-   ```bash
-   cp .env.example .env
-   # Open .env and fill in ADZUNA_APP_ID, ADZUNA_APP_KEY, GOOGLE_API_KEY at minimum
-   ```
+## Getting Started
 
-5. **Start the backend and frontend** (two terminals)
-   ```bash
-   # Terminal 1
-   make backend
-   # or: uvicorn marketscout.backend.main:app --reload --port 8000
+### Requirements
 
-   # Terminal 2
-   make frontend
-   # or: streamlit run src/marketscout/frontend/app.py
-   ```
+Python 3.9+
 
-6. **Open the app**
-   ```
-   http://localhost:8501
-   ```
+### Install
 
-## Environment Variables
+```bash
+git clone https://github.com/abosfu/marketscout
+cd marketscout
+pip install -e .
+```
 
-| Variable | Required | Purpose |
-|----------|----------|---------|
-| `ADZUNA_APP_ID` | Yes | Adzuna Jobs API app ID |
-| `ADZUNA_APP_KEY` | Yes | Adzuna Jobs API key |
-| `ADZUNA_COUNTRY` | No | ISO country code for Adzuna (default: `ca`) |
-| `GOOGLE_API_KEY` | Yes | Gemini API key for NL2SQL chat |
-| `OPENAI_API_KEY` | No | OpenAI key for LLM strategy generation; omit to use rule-based scoring |
-| `SMTP_USER` | No | Gmail address for email briefings |
-| `SMTP_APP_PASSWORD` | No | Gmail app password for email briefings |
-| `BRIEFING_RECIPIENT` | No | Address to deliver email briefings |
-| `MARKETSCOUT_MODE` | No | Strategy mode: `auto` (default), `mock`, or `llm` |
-| `MARKETSCOUT_DEFAULT_CITY` | No | Default city when none is supplied (default: `Vancouver`) |
-| `MARKETSCOUT_MAX_HEADLINES` | No | Max headlines fetched per run (default: `10`) |
-| `MARKETSCOUT_DISK_CACHE_TTL` | No | Disk cache TTL in seconds (default: `3600`) |
-| `MARKETSCOUT_CACHE_DIR` | No | Cache directory path (default: `.cache/marketscout/`) |
-| `MARKETSCOUT_DB_PATH` | No | SQLite database path (default: `.cache/marketscout/marketscout.db`) |
+### Environment Variables
 
-## Running Tests
+Create a `.env` file in the project root:
+
+```
+SERPAPI_KEY=your_serpapi_key
+NEWSAPI_KEY=your_newsapi_key
+GROQ_API_KEY=your_groq_key
+```
+
+### Run
+
+Terminal 1 — Backend:
+
+```bash
+uvicorn marketscout.backend.main:app --reload --port 8000
+```
+
+Terminal 2 — Frontend:
+
+```bash
+streamlit run src/marketscout/frontend/app.py
+```
+
+Open http://localhost:8501
+
+## Example Searches
+
+- **Vancouver + Construction** → AtkinsRéalis, Turner Construction, Axiom Builders
+- **Calgary + Banking** → CIBC, RBC, TD, Scotiabank, BMO, Neo Financial, ATB Financial
+- **Vancouver + Project Management** → AtkinsRéalis, Robert Half, Stantec, GHD Group, TELUS, Demonware
+- **Vancouver + Delivery** → Uber, DoorDash, Skip the Dishes, Canada Post, Sysco Canada
+
+## NL2SQL Examples
+
+After running a search, ask:
+
+- "Which company has the most hiring signals?"
+- "Tell me more about the TELUS work"
+- "What is DoorDash hiring for?"
+
+## Tests
 
 ```bash
 pytest tests/ -q
 ```
 
-115 tests, 1 skipped. All tests run without network access or live API keys — every HTTP and LLM call is monkeypatched.
+114 passed, 1 skipped
 
-## Architecture
+## Tech Stack
 
-The pipeline is organised in three discrete layers following the Medallion Architecture pattern. The Bronze layer is raw signal ingestion: `scout/headlines.py` fetches Google News RSS headlines for the given city and industry, and `scout/jobs.py` queries the Adzuna Jobs API for relevant postings. Results are disk-cached with a configurable TTL so repeated runs within the cache window do not make network calls. Each signal carries its source, title, URL, and a captured-at timestamp.
+Python, FastAPI, SQLite, SQLAlchemy, Streamlit, SerpAPI, NewsAPI, Groq, Pydantic, pytest
 
-The Silver layer is scoring and normalisation. `backend/ai/strategy.py` receives the raw headline and job lists, deduplicates by content hash, maps keyword hits to bottleneck categories, and computes an `OpportunityItem` for each detected opportunity with `pain_score`, `roi_signal`, `confidence`, and a `score_breakdown` dict. When `OPENAI_API_KEY` is set and `MARKETSCOUT_MODE` is `auto` or `llm`, GPT-4o-mini is used for scoring; otherwise the pipeline falls back to deterministic rule-based scoring. The output is a `StrategyOutput` object that can be serialised to JSON.
+## Security
 
-The Gold layer is persistence. After scoring, `db.py` opens a SQLAlchemy session and writes to four tables: `dim_runs` (one row per pipeline execution), `dim_opportunities` (one row per scored opportunity), `dim_signals` (deduplicated headline and job rows), and `fact_leads` (the join between opportunities and their supporting signals with scores). The write path is idempotent — re-running with the same `run_id` does not insert duplicate rows. Once written, the Gold layer is exposed read-only to the NL2SQL layer: the SQLite connection is opened with `?mode=ro` URI mode and a keyword guard rejects any generated SQL containing `DROP`, `DELETE`, `UPDATE`, or `INSERT` before execution.
-
-## Project Structure
-
-```
-marketscout/
-├── .env.example                     # copy to .env and fill in keys
-├── Makefile                         # make backend | make frontend | make test
-├── pyproject.toml                   # package config and dependencies
-├── src/marketscout/
-│   ├── __init__.py
-│   ├── cli.py                       # marketscout CLI (run, eval, bundle)
-│   ├── config.py                    # dotenv loader, env-var helpers
-│   ├── db.py                        # Gold layer: SQLAlchemy ORM, write_gold(), init_db()
-│   ├── normalize.py                 # city and industry normalisation
-│   ├── cache.py                     # disk cache with TTL
-│   ├── leads.py                     # company-level lead extraction
-│   ├── fs.py                        # filesystem helpers
-│   ├── backend/
-│   │   ├── main.py                  # FastAPI app: POST /search, /ask, /email
-│   │   ├── nl2sql.py                # LangChain NL2SQL pipeline + read-only guard
-│   │   ├── schema.py                # Pydantic v2 models
-│   │   ├── email_sender.py          # Gmail SMTP briefing sender
-│   │   └── ai/
-│   │       ├── strategy.py          # opportunity scoring (rule-based + LLM)
-│   │       ├── report_html.py       # HTML report renderer
-│   │       └── report_md.py         # Markdown report renderer
-│   ├── scout/
-│   │   ├── headlines.py             # Google News RSS fetcher (Bronze)
-│   │   ├── jobs.py                  # jobs dispatcher
-│   │   └── providers/
-│   │       ├── adzuna.py            # Adzuna Jobs API provider
-│   │       ├── rss.py               # RSS jobs fallback provider
-│   │       └── base.py              # provider base class
-│   ├── frontend/
-│   │   └── app.py                   # Streamlit dashboard (search, KPIs, NL2SQL chat, email)
-│   └── templates/
-│       └── industries.py            # keyword maps and opportunity templates
-└── tests/
-    ├── test_backend.py              # FastAPI endpoint tests (httpx + ASGITransport)
-    ├── test_db.py                   # Gold layer ORM tests
-    ├── test_api.py                  # NL2SQL safety gate tests
-    ├── test_strategy.py             # scoring and schema tests
-    ├── test_cli.py                  # CLI artifact creation tests
-    ├── test_scout.py                # signal ingestion tests
-    ├── test_cache.py                # disk cache tests
-    └── test_normalize.py            # normalisation tests
-```
+- SQL keyword blocklist rejects any write operation
+- Read-only SQLite URI connection
+- All queries scoped to current `run_id`
+- API keys stored in `.env` only, never committed
