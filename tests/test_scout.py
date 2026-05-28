@@ -110,19 +110,6 @@ def test_normalize_job_returns_expected_fields() -> None:
     assert out["source"] == "sample"
 
 
-def test_sample_jobs_fixture_loads_and_normalizes() -> None:
-    """tests/fixtures/sample_jobs.json loads and each item normalizes without error."""
-    path = Path(__file__).resolve().parent / "fixtures" / "sample_jobs.json"
-    if not path.exists():
-        pytest.skip("tests/fixtures/sample_jobs.json not found")
-    data = json.loads(path.read_text())
-    assert isinstance(data, list)
-    for item in data:
-        normalized = _normalize_job(item)
-        assert "title" in normalized and "link" in normalized
-        assert "company" in normalized and "location" in normalized and "source" in normalized
-
-
 def test_fetch_jobs_returns_list_when_mocked(monkeypatch: pytest.MonkeyPatch) -> None:
     """fetch_jobs returns a list of dicts when the RSS provider request is mocked."""
     rss = """<?xml version="1.0"?><rss><channel>

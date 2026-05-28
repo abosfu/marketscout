@@ -4,10 +4,9 @@ Endpoints:
   GET  /          — health check
   POST /search    — run full pipeline and return scored opportunities
   POST /ask       — NL2SQL query against the Gold layer database
-  POST /email     — send a plain-text briefing via Gmail SMTP
 
 The legacy /api/ask route (nl2sql router) is preserved for backward compatibility.
-All three feature endpoints live directly in this file — no router splitting.
+All feature endpoints live directly in this file — no router splitting.
 """
 
 from __future__ import annotations

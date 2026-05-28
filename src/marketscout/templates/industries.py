@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 from marketscout.normalize import SUPPORTED_INDUSTRIES, normalize_industry  # noqa: F401 (re-exported for convenience)
 

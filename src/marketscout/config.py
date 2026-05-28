@@ -85,11 +85,6 @@ def get_groq_key() -> str:
     return (os.environ.get("GROQ_API_KEY") or "").strip()
 
 
-def get_google_api_key() -> str:
-    """Legacy Gemini API key (kept for backward compatibility). Set via GOOGLE_API_KEY."""
-    return (os.environ.get("GOOGLE_API_KEY") or "").strip()
-
-
 def get_serpapi_key() -> str:
     """SerpAPI key for Google Jobs via SerpApi. Set via SERPAPI_KEY."""
     return (os.environ.get("SERPAPI_KEY") or "").strip()
@@ -98,8 +93,3 @@ def get_serpapi_key() -> str:
 def get_newsapi_key() -> str:
     """NewsAPI.org API key for headline search. Set via NEWSAPI_KEY."""
     return (os.environ.get("NEWSAPI_KEY") or "").strip()
-
-
-def get_crunchbase_key() -> str:
-    """Crunchbase Basic API user key for funding-round search. Set via CRUNCHBASE_KEY."""
-    return (os.environ.get("CRUNCHBASE_KEY") or "").strip()

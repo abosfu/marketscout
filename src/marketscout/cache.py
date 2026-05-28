@@ -8,9 +8,6 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from marketscout.config import get_cache_dir, get_disk_cache_ttl_seconds
-
-
 def cache_key(city: str, industry: str, d: date | None = None) -> str:
     """Return a filesystem-safe cache key for (city, industry, date)."""
     d = d or date.today()

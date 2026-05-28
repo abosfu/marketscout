@@ -3,7 +3,6 @@
 Tests:
   - POST /search  — mocked pipeline returns 200 with correct response shape
   - POST /ask     — missing database returns 503
-  - POST /email   — missing SMTP config returns 200 with sent=False
 """
 
 from __future__ import annotations
